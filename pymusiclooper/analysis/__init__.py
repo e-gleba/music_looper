@@ -71,6 +71,11 @@ from pymusiclooper.analysis.experts import (
     MelodicExpert,
     SpectralExpert,
     CrossfadeExpert,
+    MicrotimingExpert,
+    EnergyFlowExpert,
+    ResonanceExpert,
+    TextureExpert,
+    ContinuityExpert,
     ExpertEnsemble,
 )
 
@@ -113,6 +118,11 @@ __all__ = [
     'MelodicExpert',
     'SpectralExpert',
     'CrossfadeExpert',
+    'MicrotimingExpert',
+    'EnergyFlowExpert',
+    'ResonanceExpert',
+    'TextureExpert',
+    'ContinuityExpert',
     'ExpertEnsemble',
     
     # Quality metrics

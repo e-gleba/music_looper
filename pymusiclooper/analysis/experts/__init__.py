@@ -33,6 +33,14 @@ from pymusiclooper.analysis.experts.phrase import PhraseExpert
 from pymusiclooper.analysis.experts.melodic import MelodicExpert
 from pymusiclooper.analysis.experts.spectral import SpectralExpert
 from pymusiclooper.analysis.experts.crossfade import CrossfadeExpert
+from pymusiclooper.analysis.experts.microtiming import MicrotimingExpert
+from pymusiclooper.analysis.experts.energy_flow import EnergyFlowExpert
+from pymusiclooper.analysis.experts.resonance import ResonanceExpert
+from pymusiclooper.analysis.experts.texture import TextureExpert
+from pymusiclooper.analysis.experts.continuity import ContinuityExpert
+from pymusiclooper.analysis.experts.vocal import VocalExpert
+from pymusiclooper.analysis.experts.ensemble_instruments import EnsembleInstrumentsExpert
+from pymusiclooper.analysis.experts.transition_effects import TransitionEffectsExpert
 from pymusiclooper.analysis.experts.ensemble import ExpertEnsemble
 
 __all__ = [
@@ -58,6 +66,16 @@ __all__ = [
     'MelodicExpert',
     'SpectralExpert',
     'CrossfadeExpert',
+    
+    # Organic flow experts
+    'MicrotimingExpert',
+    'EnergyFlowExpert',
+    'ResonanceExpert',
+    'TextureExpert',
+    'ContinuityExpert',
+    'VocalExpert',
+    'EnsembleInstrumentsExpert',
+    'TransitionEffectsExpert',
     
     # Ensemble
     'ExpertEnsemble',

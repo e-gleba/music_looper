@@ -80,17 +80,27 @@ def find_multi_hop_loops(
         logging.warning("No similar sections found")
         return []
     
-    # Finalize sample positions
+    # Finalize sample positions with rhythm-preserving alignment
     for chain in chains:
         chain.segment_samples = []
         for start_f, end_f in chain.segments:
+            # Get beat phases and transient strengths to preserve rhythm alignment
+            start_phase = float(features.beat_phase[min(int(start_f), len(features.beat_phase) - 1)])
+            end_phase = float(features.beat_phase[min(int(end_f), len(features.beat_phase) - 1)])
+            start_transient = float(features.transient_strength[min(int(start_f), len(features.transient_strength) - 1)])
+            end_transient = float(features.transient_strength[min(int(end_f), len(features.transient_strength) - 1)])
+            
             start_s = nearest_zero_crossing(
                 mlaudio.playback_audio, mlaudio.rate,
-                mlaudio.frames_to_samples(start_f)
+                mlaudio.frames_to_samples(start_f),
+                beat_phase=start_phase,
+                transient_strength=start_transient
             )
             end_s = nearest_zero_crossing(
                 mlaudio.playback_audio, mlaudio.rate,
-                mlaudio.frames_to_samples(end_f)
+                mlaudio.frames_to_samples(end_f),
+                beat_phase=end_phase,
+                transient_strength=end_transient
             )
             chain.segment_samples.append((start_s, end_s))
     
@@ -132,10 +142,10 @@ def _find_similar_sections(
     for seg_len_steps in range(2, min(20, n_segments // 2)):
         seg_len_frames = seg_len_steps * step * (feat.beat_length or 20)
         
-        # More relaxed constraints
-        if seg_len_frames < min_frames * 0.5:
+        # Check segment length constraints
+        if seg_len_frames < min_frames:
             continue
-        if seg_len_frames > max_frames * 2:
+        if seg_len_frames > max_frames:
             continue
         
         # Find all similar segment pairs
@@ -147,7 +157,7 @@ def _find_similar_sections(
             seg_i_end = segment_starts[seg_i_end_idx]
             
             actual_len_i = seg_i_end - seg_i_start
-            if actual_len_i < min_frames * 0.5 or actual_len_i > max_frames * 2:
+            if actual_len_i < min_frames or actual_len_i > max_frames:
                 continue
             
             for j in range(i + 1, n_segments - seg_len_steps):
@@ -160,7 +170,7 @@ def _find_similar_sections(
                     continue
                 
                 actual_len_j = seg_j_end - seg_j_start
-                if actual_len_j < min_frames * 0.5 or actual_len_j > max_frames * 2:
+                if actual_len_j < min_frames or actual_len_j > max_frames:
                     continue
                 
                 # Calculate similarity between segments

@@ -130,7 +130,7 @@ def find_segment_loop_points(
             rhythm_score = ensemble.experts[1].score(ctx)  # RhythmExpert
             harmonic_score = ensemble.experts[0].score(ctx)  # HarmonicExpert
             
-            # Convert to samples with zero-crossing alignment
+            # Convert to samples with zero-crossing alignment (preserving rhythm)
             from pymusiclooper.analysis.features import nearest_zero_crossing
             loop_start_samples = mlaudio.frames_to_samples(
                 mlaudio.apply_trim_offset(loop_start_frame)
@@ -139,11 +139,19 @@ def find_segment_loop_points(
                 mlaudio.apply_trim_offset(loop_end_frame)
             )
             
+            # Get beat phases and transient strengths to preserve rhythm alignment
+            start_phase = float(feat.beat_phase[min(loop_start_frame, len(feat.beat_phase) - 1)])
+            end_phase = float(feat.beat_phase[min(loop_end_frame, len(feat.beat_phase) - 1)])
+            start_transient = float(feat.transient_strength[min(loop_start_frame, len(feat.transient_strength) - 1)])
+            end_transient = float(feat.transient_strength[min(loop_end_frame, len(feat.transient_strength) - 1)])
+            
             loop_start_samples = nearest_zero_crossing(
-                mlaudio.playback_audio, mlaudio.rate, loop_start_samples
+                mlaudio.playback_audio, mlaudio.rate, loop_start_samples, 
+                beat_phase=start_phase, transient_strength=start_transient
             )
             loop_end_samples = nearest_zero_crossing(
-                mlaudio.playback_audio, mlaudio.rate, loop_end_samples
+                mlaudio.playback_audio, mlaudio.rate, loop_end_samples, 
+                beat_phase=end_phase, transient_strength=end_transient
             )
             
             # Generate explanation

@@ -16,6 +16,7 @@ import numpy as np
 from scipy.signal import correlate, hilbert
 
 from pymusiclooper.analysis.experts.base import Expert, TransitionContext
+from pymusiclooper.transitions import analyze_transition_quality
 
 
 class CrossfadeExpert(Expert):
@@ -32,12 +33,17 @@ class CrossfadeExpert(Expert):
     def score(self, ctx: TransitionContext) -> float:
         """Evaluate waveform compatibility for crossfade."""
         
-        # Get audio regions around transition
-        fade_ms = 50
-        fade_samples = int(ctx.sr * fade_ms / 1000)
-        
         start_samples = ctx.start_frame * ctx.hop
         end_samples = ctx.end_frame * ctx.hop
+        
+        # Use transition quality analysis for better scoring
+        quality_info = analyze_transition_quality(
+            ctx.audio, start_samples, end_samples, ctx.sr
+        )
+        
+        # Get audio regions around transition
+        fade_ms = quality_info['fade_ms']
+        fade_samples = int(ctx.sr * fade_ms / 1000)
         
         audio_len = len(ctx.audio)
         
@@ -75,22 +81,26 @@ class CrossfadeExpert(Expert):
         # 6. Transient absence at cut
         transient_score = score_transient_absence(pre, post)
         
-        # 7. Simulated crossfade smoothness
+        # 7. Simulated crossfade smoothness (using actual crossfade)
         smoothness_score = compute_crossfade_smoothness(pre, post)
         
         # 8. Spectral similarity in fade region
         spectral_score = compute_fade_spectral_match(pre, post)
         
-        # Combine scores
+        # 9. Quality score from transition analysis
+        quality_score = quality_info['quality_score']
+        
+        # Combine scores (weighted towards quality analysis)
         score = (
-            corr_score * 0.15 +
-            env_score * 0.15 +
-            zcr_score * 0.10 +
-            cut_amp_score * 0.10 +
-            phase_score * 0.15 +
-            transient_score * 0.15 +
+            corr_score * 0.12 +
+            env_score * 0.12 +
+            zcr_score * 0.08 +
+            cut_amp_score * 0.08 +
+            phase_score * 0.12 +
+            transient_score * 0.12 +
             smoothness_score * 0.10 +
-            spectral_score * 0.10
+            spectral_score * 0.08 +
+            quality_score * 0.18  # Higher weight for quality analysis
         )
         
         return max(0.0, min(1.0, score))
@@ -153,11 +163,21 @@ def score_cut_amplitude(pre: np.ndarray, post: np.ndarray) -> float:
 
 def compute_phase_alignment(pre: np.ndarray, post: np.ndarray) -> float:
     """
-    Compute phase alignment using Hilbert transform.
+    Compute phase alignment using advanced multi-resolution analysis.
     
-    Aligned phase means smoother transition.
+    Uses cross-correlation and multi-band analysis for better accuracy.
     """
     try:
+        # Try advanced phase alignment first
+        try:
+            from pymusiclooper.transitions_advanced import advanced_phase_alignment
+            sr = 44100  # Default, actual SR not critical for scoring
+            _, phase_coherence = advanced_phase_alignment(pre, post, sr, window_ms=100)
+            return float(phase_coherence)
+        except Exception:
+            pass
+        
+        # Fallback to Hilbert transform method
         # Get instantaneous phase
         analytic_pre = hilbert(pre[-min(256, len(pre)):])
         analytic_post = hilbert(post[:min(256, len(post))])

@@ -82,39 +82,28 @@ class HarmonicExpert(Expert):
         )
 
 
-@njit(cache=True, fastmath=True)
 def detect_key(chroma: np.ndarray) -> tuple[int, int]:
     """Detect key using Krumhansl-Kessler profiles. Returns (key, mode)."""
     major_profile = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
     minor_profile = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
     
-    best_key = 0
-    best_mode = 0
-    best_corr = -2.0
+    # Vectorized: rotate chroma for all 12 keys at once
+    keys = np.arange(12)
+    indices = (np.arange(12)[:, np.newaxis] + keys) % 12  # Shape: (12, 12)
+    rotated_chromas = chroma[indices]  # Shape: (12, 12)
     
-    for key in range(12):
-        # Rotate chroma to key
-        rotated = np.zeros(12)
-        for i in range(12):
-            rotated[i] = chroma[(i + key) % 12]
-        
-        # Correlate with profiles
-        maj_corr = 0.0
-        min_corr = 0.0
-        for i in range(12):
-            maj_corr += rotated[i] * major_profile[i]
-            min_corr += rotated[i] * minor_profile[i]
-        
-        if maj_corr > best_corr:
-            best_corr = maj_corr
-            best_key = key
-            best_mode = 0
-        if min_corr > best_corr:
-            best_corr = min_corr
-            best_key = key
-            best_mode = 1
+    # Vectorized correlation: (12, 12) @ (12,) = (12,)
+    maj_corrs = rotated_chromas @ major_profile
+    min_corrs = rotated_chromas @ minor_profile
     
-    return best_key, best_mode
+    # Find best correlation
+    all_corrs = np.concatenate([maj_corrs, min_corrs])
+    best_idx = np.argmax(all_corrs)
+    
+    if best_idx < 12:
+        return int(best_idx), 0  # Major
+    else:
+        return int(best_idx - 12), 1  # Minor
 
 
 @njit(cache=True, fastmath=True)
@@ -140,22 +129,11 @@ def compute_key_distance(key1: int, mode1: int, key2: int, mode2: int) -> float:
     return min(1.0, cof_dist / 6.0 + mode_penalty)
 
 
-@njit(cache=True, fastmath=True)
 def compute_harmonic_tension(chroma1: np.ndarray, chroma2: np.ndarray) -> float:
     """Compute harmonic tension based on interval relationships."""
-    # Find dominant pitches
-    max1_idx = 0
-    max2_idx = 0
-    max1_val = chroma1[0]
-    max2_val = chroma2[0]
-    
-    for i in range(1, 12):
-        if chroma1[i] > max1_val:
-            max1_val = chroma1[i]
-            max1_idx = i
-        if chroma2[i] > max2_val:
-            max2_val = chroma2[i]
-            max2_idx = i
+    # Vectorized: find dominant pitches
+    max1_idx = np.argmax(chroma1)
+    max2_idx = np.argmax(chroma2)
     
     # Interval tension (dissonance map)
     interval = abs(max1_idx - max2_idx)
@@ -166,16 +144,11 @@ def compute_harmonic_tension(chroma1: np.ndarray, chroma2: np.ndarray) -> float:
     tension_map = np.array([0.0, 0.9, 0.6, 0.3, 0.25, 0.1, 0.85])
     base_tension = tension_map[interval]
     
-    # Modulate by chroma similarity
-    dot = 0.0
-    n1 = 0.0
-    n2 = 0.0
-    for i in range(12):
-        dot += chroma1[i] * chroma2[i]
-        n1 += chroma1[i] * chroma1[i]
-        n2 += chroma2[i] * chroma2[i]
-    
-    denom = np.sqrt(n1 * n2)
+    # Vectorized chroma similarity (cosine similarity)
+    dot = np.dot(chroma1, chroma2)
+    n1 = np.linalg.norm(chroma1)
+    n2 = np.linalg.norm(chroma2)
+    denom = n1 * n2
     chroma_sim = dot / denom if denom > 1e-10 else 0.5
     
     return base_tension * 0.6 + (1.0 - chroma_sim) * 0.4

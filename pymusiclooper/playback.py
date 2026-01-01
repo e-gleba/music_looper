@@ -84,13 +84,89 @@ class PlaybackHandler:
             def callback(outdata, frames, time, status):
                 chunksize = min(len(playback_data) - self.current_frame, frames)
 
-                # Audio looping logic
+                # Audio looping logic with smooth crossfade
                 if self.looping and self.current_frame + frames > loop_end:
                     pre_loop_index = loop_end - self.current_frame
                     remaining_frames = frames - (loop_end - self.current_frame)
                     adjusted_next_frame_idx = loop_start + remaining_frames
-                    outdata[:pre_loop_index] = playback_data[self.current_frame : loop_end]
-                    outdata[pre_loop_index:frames] = playback_data[loop_start:adjusted_next_frame_idx]
+                    
+                    # Calculate crossfade length (adaptive but simple)
+                    fade_ms = 30  # Default 30ms crossfade
+                    fade_samples = int(samplerate * fade_ms / 1000)
+                    fade_samples = min(fade_samples, pre_loop_index, remaining_frames)
+                    
+                    if fade_samples > 16 and pre_loop_index > fade_samples and remaining_frames > fade_samples:
+                        # Apply crossfade
+                        pre_segment = playback_data[self.current_frame : loop_end]
+                        post_segment = playback_data[loop_start:adjusted_next_frame_idx]
+                        
+                        try:
+                            # Use adaptive transition selector for playback (best quality with effects)
+                            # ALWAYS detects and masks rhythm gaps
+                            try:
+                                from pymusiclooper.transitions_effects import adaptive_transition_selector
+                                crossfaded = adaptive_transition_selector(
+                                    pre_segment[-fade_samples:],
+                                    post_segment[:fade_samples],
+                                    samplerate,
+                                    fade_samples,
+                                    rhythm_score=0.7,  # Can be improved with context
+                                    harmonic_score=0.7,
+                                    transient_strength=0.4,
+                                    has_vocals=False,
+                                )
+                            except Exception:
+                                # Fallback to perceptual crossfade
+                                try:
+                                    from pymusiclooper.transitions_advanced import perceptual_crossfade
+                                    crossfaded = perceptual_crossfade(
+                                        pre_segment[-fade_samples:],
+                                        post_segment[:fade_samples],
+                                        samplerate,
+                                        fade_samples
+                                    )
+                                except Exception:
+                                    # Final fallback to cosine crossfade
+                                    from pymusiclooper.transitions import cosine_crossfade
+                                    crossfaded = cosine_crossfade(
+                                        pre_segment[-fade_samples:],
+                                        post_segment[:fade_samples],
+                                        fade_samples
+                                    )
+                            
+                            # Copy audio with crossfade
+                            if pre_loop_index > fade_samples:
+                                outdata[:pre_loop_index - fade_samples] = (
+                                    playback_data[self.current_frame : loop_end - fade_samples]
+                                )
+                            
+                            # Crossfaded section
+                            crossfade_start = pre_loop_index - fade_samples
+                            crossfade_end = crossfade_start + len(crossfaded)
+                            if crossfade_end <= frames:
+                                outdata[crossfade_start:crossfade_end] = crossfaded
+                                
+                                # Rest of post segment
+                                if remaining_frames > fade_samples:
+                                    post_start = fade_samples
+                                    post_end = min(remaining_frames, frames - crossfade_end)
+                                    if post_end > post_start:
+                                        outdata[crossfade_end:crossfade_end + (post_end - post_start)] = (
+                                            post_segment[post_start:post_start + (post_end - post_start)]
+                                        )
+                            else:
+                                # Crossfade doesn't fit, use simple copy
+                                outdata[:pre_loop_index] = pre_segment
+                                outdata[pre_loop_index:frames] = post_segment[:remaining_frames]
+                        except Exception:
+                            # Fallback to simple copy if crossfade fails
+                            outdata[:pre_loop_index] = playback_data[self.current_frame : loop_end]
+                            outdata[pre_loop_index:frames] = playback_data[loop_start:adjusted_next_frame_idx]
+                    else:
+                        # Too short for crossfade, use simple copy
+                        outdata[:pre_loop_index] = playback_data[self.current_frame : loop_end]
+                        outdata[pre_loop_index:frames] = playback_data[loop_start:adjusted_next_frame_idx]
+                    
                     self.current_frame = adjusted_next_frame_idx
                     self.loop_counter += 1
                     rich_console.print(f"[dim italic yellow]Currently on loop #{self.loop_counter}.[/]", end="\r")
@@ -211,12 +287,72 @@ class PlaybackHandler:
                         self.segment_end = seg_end
                         seg_remaining = seg_end - seg_start
                     
-                    # Copy audio
+                    # Copy audio with crossfade at segment boundaries
                     to_copy = min(remaining, seg_remaining)
-                    outdata[out_offset:out_offset + to_copy] = playback_data[self.current_frame:self.current_frame + to_copy]
-                    self.current_frame += to_copy
-                    out_offset += to_copy
-                    remaining -= to_copy
+                    
+                    # Check if we're at a segment boundary (need crossfade)
+                    if seg_remaining <= to_copy and self.looping:
+                        # We're at the end of current segment, apply crossfade
+                        next_seg_idx = (self.current_segment_idx + 1) % len(self.segments)
+                        next_start, next_end = self.segments[next_seg_idx]
+                        
+                        from pymusiclooper.transitions import cosine_crossfade
+                        
+                        # Calculate crossfade length
+                        fade_ms = 25  # 25ms crossfade for multi-hop
+                        fade_samples = int(samplerate * fade_ms / 1000)
+                        fade_samples = min(fade_samples, to_copy // 2)
+                        
+                        if fade_samples > 16 and to_copy > fade_samples * 2:
+                            # Apply crossfade
+                            current_seg = playback_data[self.current_frame:self.current_frame + to_copy]
+                            next_seg = playback_data[next_start:min(len(playback_data), next_start + to_copy)]
+                            
+                            try:
+                                # Crossfade only the overlapping part
+                                crossfaded = cosine_crossfade(
+                                    current_seg[-fade_samples:],
+                                    next_seg[:fade_samples],
+                                    fade_samples
+                                )
+                                
+                                # Copy non-crossfaded parts
+                                if to_copy > fade_samples:
+                                    outdata[out_offset:out_offset + (to_copy - fade_samples)] = (
+                                        current_seg[:-(fade_samples)]
+                                    )
+                                
+                                # Copy crossfaded part
+                                crossfade_start = out_offset + (to_copy - fade_samples)
+                                crossfade_end = crossfade_start + len(crossfaded)
+                                if crossfade_end <= len(outdata):
+                                    outdata[crossfade_start:crossfade_end] = crossfaded
+                                
+                                self.current_frame += to_copy
+                                out_offset += min(to_copy, remaining)
+                                remaining -= min(to_copy, remaining)
+                            except Exception:
+                                # Fallback to simple copy
+                                outdata[out_offset:out_offset + to_copy] = (
+                                    playback_data[self.current_frame:self.current_frame + to_copy]
+                                )
+                                self.current_frame += to_copy
+                                out_offset += to_copy
+                                remaining -= to_copy
+                        else:
+                            # Too short for crossfade, use simple copy
+                            outdata[out_offset:out_offset + to_copy] = (
+                                playback_data[self.current_frame:self.current_frame + to_copy]
+                            )
+                            self.current_frame += to_copy
+                            out_offset += to_copy
+                            remaining -= to_copy
+                    else:
+                        # Normal copy
+                        outdata[out_offset:out_offset + to_copy] = playback_data[self.current_frame:self.current_frame + to_copy]
+                        self.current_frame += to_copy
+                        out_offset += to_copy
+                        remaining -= to_copy
 
             self.stream = sd().OutputStream(
                 samplerate=samplerate,

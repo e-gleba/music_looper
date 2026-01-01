@@ -20,7 +20,7 @@ class TimbreExpert(Expert):
     """Expert for timbral/spectral continuity."""
     
     name = "timbre"
-    weight = 0.12
+    weight = 0.18  # Increased weight - timbre mismatch is very audible
     
     def score(self, ctx: TransitionContext) -> float:
         """Evaluate timbral continuity at transition point."""

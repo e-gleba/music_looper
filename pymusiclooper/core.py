@@ -133,7 +133,8 @@ class MusicLooper:
         loop_start: int,
         loop_end: int,
         format: str = "WAV",
-        output_dir: Optional[str] = None
+        output_dir: Optional[str] = None,
+        with_crossfade: bool = True,
     ):
         """Exports the audio into three files: intro, loop and outro.
 
@@ -142,6 +143,7 @@ class MusicLooper:
             loop_end (int): Loop end in samples.
             format (str, optional): Audio format of the exported files (formats available depend on the `soundfile` library). Defaults to "WAV".
             output_dir (str, optional): Path to the output directory. Defaults to the same diretcory as the source audio file.
+            with_crossfade (bool, optional): Apply crossfade for seamless loop. Defaults to True.
         """
         if output_dir is not None:
             out_path = os.path.join(output_dir, self.mlaudio.filename)
@@ -154,12 +156,25 @@ class MusicLooper:
             self.mlaudio.rate,
             format=format,
         )
-        soundfile.write(
-            f"{out_path}-loop.{format.lower()}",
-            self.mlaudio.playback_audio[loop_start:loop_end],
-            self.mlaudio.rate,
-            format=format,
-        )
+        
+        # Export loop with or without crossfade
+        if with_crossfade:
+            from pymusiclooper.export_enhanced import export_loop_with_crossfade
+            export_loop_with_crossfade(
+                self.mlaudio,
+                loop_start,
+                loop_end,
+                f"{out_path}-loop.{format.lower()}",
+                format=format
+            )
+        else:
+            soundfile.write(
+                f"{out_path}-loop.{format.lower()}",
+                self.mlaudio.playback_audio[loop_start:loop_end],
+                self.mlaudio.rate,
+                format=format,
+            )
+        
         soundfile.write(
             f"{out_path}-outro.{format.lower()}",
             self.mlaudio.playback_audio[loop_end:],
@@ -176,6 +191,7 @@ class MusicLooper:
         disable_fade_out: bool = False,
         format: str = "WAV",
         output_dir: Optional[str] = None,
+        use_crossfade: bool = True,
     ) -> str:
         """Extends the audio by looping to at least the specified length.
         Returns the path to the extended audio file. 
@@ -188,7 +204,10 @@ class MusicLooper:
             disable_fade_out (bool, optional): Disable fading out from the loop section, and instead, includes the audio outro section . If `True`, `extended_length` will be treated as an 'at least' constraint.
             format (str, optional): Audio format of the exported files (formats available depend on the `soundfile` library). Defaults to "WAV".
             output_dir (str, optional): Path to the output directory. Defaults to the same directory as the source audio file.
+            use_crossfade (bool, optional): Apply seamless crossfade between loop iterations. Defaults to True.
         """
+        from pymusiclooper.transitions import adaptive_crossfade, cosine_crossfade, analyze_transition_quality
+        
         if output_dir is not None:
             out_path = os.path.join(output_dir, self.mlaudio.filename)
         else:
@@ -210,10 +229,25 @@ class MusicLooper:
             loop_extended_length -= outro.shape[0]
 
         loop_factor = loop_extended_length / loop.shape[0]
-        left_over_multiplier = loop_factor - int(loop_factor)
+        n_full_loops = int(loop_factor)
+        left_over_multiplier = loop_factor - n_full_loops
         extend_end_idx = loop_start + int(
             (loop_end - loop_start) * left_over_multiplier
         )
+
+        # Determine optimal crossfade length for seamless transitions
+        crossfade_samples = 0
+        if use_crossfade and n_full_loops > 0:
+            # Analyze transition quality to determine optimal crossfade
+            quality_info = analyze_transition_quality(
+                self.mlaudio.playback_audio, loop_start, loop_end, self.mlaudio.rate
+            )
+            crossfade_ms = quality_info['fade_ms']
+            crossfade_samples = int(self.mlaudio.rate * crossfade_ms / 1000)
+            # Limit crossfade to reasonable portion of loop (max 25%)
+            max_crossfade = loop.shape[0] // 4
+            crossfade_samples = min(crossfade_samples, max_crossfade, 2000)  # Max 2k samples
+            crossfade_samples = max(crossfade_samples, 32)  # Min 32 samples
 
         # Modify the extended track's final loop section based on the fade out parameter
         final_loop = self.mlaudio.playback_audio[loop_start:extend_end_idx].copy()
@@ -229,9 +263,11 @@ class MusicLooper:
             )
 
         # Format extended file name with its duration suffixed
+        # Account for crossfade overlap in length calculation
+        crossfade_overlap = crossfade_samples * n_full_loops if use_crossfade else 0
         extended_loop_length = final_loop.shape[0] + (
-            loop.shape[0] * (int(loop_factor))
-        )
+            loop.shape[0] * n_full_loops
+        ) - crossfade_overlap
         extended_audio_length = (
             intro.shape[0]
             + extended_loop_length
@@ -250,7 +286,7 @@ class MusicLooper:
             f"{out_path}-extended-{extended_audio_length_fmt}.{format.lower()}"
         )
 
-        # Export with buffered write logic to avoid storing the entire extended audio in-memory
+        # Export with seamless crossfade between loops
         with soundfile.SoundFile(
             output_file_path,
             mode="w",
@@ -259,10 +295,188 @@ class MusicLooper:
             format=format,
         ) as sf:
             dtype = str(self.mlaudio.playback_audio.dtype)
+            
+            # Write intro
             sf.buffer_write(intro.tobytes(order="C"), dtype)
-            for _ in range(int(loop_factor)):
-                sf.buffer_write(loop.tobytes(order="C"), dtype)
-            sf.buffer_write(final_loop.tobytes(order="C"), dtype)
+            
+            # Write loop iterations with seamless crossfade
+            if use_crossfade and n_full_loops > 0 and crossfade_samples > 0:
+                # First loop iteration (full, no crossfade at start)
+                loop_without_end = loop[:-crossfade_samples]
+                sf.buffer_write(loop_without_end.tobytes(order="C"), dtype)
+                
+                # Middle loop iterations with crossfade
+                loop_end_part = loop[-crossfade_samples:]
+                loop_start_part = loop[:crossfade_samples]
+                
+                # Use ultra-perfect transition for highest quality exports
+                try:
+                    from pymusiclooper.transitions_ultra import ultra_perfect_transition
+                    use_ultra = True
+                except Exception:
+                    try:
+                        from pymusiclooper.transitions_effects import perfect_transition
+                        use_perfect = True
+                        use_ultra = False
+                    except Exception:
+                        try:
+                            from pymusiclooper.transitions_advanced import organic_crossfade
+                            use_organic = True
+                            use_perfect = False
+                            use_ultra = False
+                        except Exception:
+                            use_organic = False
+                            use_perfect = False
+                            use_ultra = False
+                
+                for i in range(n_full_loops - 1):
+                    # Crossfade from end of previous to start of next
+                    if use_ultra:
+                        # Use ultra-perfect transition (maximum quality with full analysis)
+                        crossfaded = ultra_perfect_transition(
+                            loop_end_part,
+                            loop_start_part,
+                            self.mlaudio.rate,
+                            min_ms=30,
+                            max_ms=150,
+                        )
+                    elif use_perfect:
+                        # Use perfect transition with effects (best quality)
+                        crossfaded = perfect_transition(
+                            loop_end_part,
+                            loop_start_part,
+                            self.mlaudio.rate,
+                            min_ms=20,
+                            max_ms=80,
+                            rhythm_score=0.7,  # Assume good rhythm (can be improved with context)
+                            harmonic_score=0.7,
+                            transient_strength=0.4,  # Can be improved with analysis
+                            has_vocals=False,  # Can be improved with analysis
+                        )
+                    elif use_organic:
+                        # Fallback to organic crossfade
+                        crossfaded = organic_crossfade(
+                            loop_end_part,
+                            loop_start_part,
+                            self.mlaudio.rate,
+                            min_ms=20,
+                            max_ms=80,
+                            use_phase_alignment=True,
+                            use_spectral_morph=True,
+                            use_perceptual=True,
+                            use_eq_match=True,
+                        )
+                    else:
+                        crossfaded = adaptive_crossfade(
+                            loop_end_part,
+                            loop_start_part,
+                            self.mlaudio.rate
+                        )
+                    # Write crossfaded transition
+                    sf.buffer_write(crossfaded.tobytes(order="C"), dtype)
+                    # Write rest of loop (without start and end parts)
+                    if loop.shape[0] > crossfade_samples * 2:
+                        loop_middle = loop[crossfade_samples:-crossfade_samples]
+                        sf.buffer_write(loop_middle.tobytes(order="C"), dtype)
+                    # Update for next iteration
+                    loop_end_part = loop[-crossfade_samples:]
+                
+                # Last full loop iteration - crossfade to final loop
+                if final_loop.shape[0] > 0:
+                    final_start_part = final_loop[:min(crossfade_samples, final_loop.shape[0])]
+                    if len(final_start_part) == crossfade_samples:
+                        if use_ultra:
+                            crossfaded = ultra_perfect_transition(
+                                loop_end_part,
+                                final_start_part,
+                                self.mlaudio.rate,
+                                min_ms=30,
+                                max_ms=150,
+                            )
+                        elif use_perfect:
+                            crossfaded = perfect_transition(
+                                loop_end_part,
+                                final_start_part,
+                                self.mlaudio.rate,
+                                min_ms=20,
+                                max_ms=80,
+                                rhythm_score=0.7,
+                                harmonic_score=0.7,
+                                transient_strength=0.4,
+                                has_vocals=False,
+                            )
+                        elif use_organic:
+                            crossfaded = organic_crossfade(
+                                loop_end_part,
+                                final_start_part,
+                                self.mlaudio.rate,
+                                min_ms=20,
+                                max_ms=80,
+                                use_phase_alignment=True,
+                                use_spectral_morph=True,
+                                use_perceptual=True,
+                                use_eq_match=True,
+                            )
+                        else:
+                            crossfaded = adaptive_crossfade(
+                                loop_end_part,
+                                final_start_part,
+                                self.mlaudio.rate
+                            )
+                        sf.buffer_write(crossfaded.tobytes(order="C"), dtype)
+                        # Write rest of final loop
+                        if final_loop.shape[0] > crossfade_samples:
+                            sf.buffer_write(final_loop[crossfade_samples:].tobytes(order="C"), dtype)
+                    else:
+                        # Final loop too short for crossfade, just append
+                        sf.buffer_write(final_loop.tobytes(order="C"), dtype)
+                else:
+                    # No final loop, just crossfade to end
+                    if use_ultra:
+                        crossfaded = ultra_perfect_transition(
+                            loop_end_part,
+                            loop_start_part,
+                            self.mlaudio.rate,
+                            min_ms=30,
+                            max_ms=150,
+                        )
+                    elif use_perfect:
+                        crossfaded = perfect_transition(
+                            loop_end_part,
+                            loop_start_part,
+                            self.mlaudio.rate,
+                            min_ms=20,
+                            max_ms=80,
+                            rhythm_score=0.7,
+                            harmonic_score=0.7,
+                            transient_strength=0.4,
+                            has_vocals=False,
+                        )
+                    elif use_organic:
+                        crossfaded = organic_crossfade(
+                            loop_end_part,
+                            loop_start_part,
+                            self.mlaudio.rate,
+                            min_ms=20,
+                            max_ms=80,
+                            use_phase_alignment=True,
+                            use_spectral_morph=True,
+                            use_perceptual=True,
+                            use_eq_match=True,
+                        )
+                    else:
+                        crossfaded = adaptive_crossfade(
+                            loop_end_part,
+                            loop_start_part,
+                            self.mlaudio.rate
+                        )
+                    sf.buffer_write(crossfaded.tobytes(order="C"), dtype)
+            else:
+                # No crossfade - simple concatenation (legacy behavior)
+                for _ in range(n_full_loops):
+                    sf.buffer_write(loop.tobytes(order="C"), dtype)
+                sf.buffer_write(final_loop.tobytes(order="C"), dtype)
+            
             if disable_fade_out:
                 sf.buffer_write(outro.tobytes(order="C"), dtype)
 

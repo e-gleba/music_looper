@@ -400,10 +400,60 @@ def _compute_sub_beat_phase(beats: np.ndarray, n_frames: int) -> np.ndarray:
     return phase
 
 
-def nearest_zero_crossing(audio: np.ndarray, sr: int, target: int) -> int:
-    """Find nearest zero crossing to target sample for click-free transitions."""
-    search_ms = 5
+def nearest_zero_crossing(
+    audio: np.ndarray, 
+    sr: int, 
+    target: int, 
+    beat_phase: float = None,
+    transient_strength: float = None,
+    use_multi_band: bool = True,
+) -> int:
+    """
+    Find nearest zero crossing to target sample for click-free transitions.
+    
+    Uses adaptive window based on rhythm and transient strength to preserve
+    precise timing, especially for drums/percussion.
+    
+    Optionally uses multi-band analysis for better phase coherence.
+    
+    Args:
+        audio: Audio signal (mono or stereo)
+        sr: Sample rate
+        target: Target sample index
+        beat_phase: Optional beat phase (0-1) to preserve rhythm alignment
+        transient_strength: Optional transient strength (0-1) for drum-aware alignment
+        use_multi_band: Use multi-band zero-crossing alignment for better phase coherence
+    
+    Returns:
+        Sample index of nearest zero crossing, or target if none found
+    """
+    # Use advanced multi-band alignment if enabled and conditions are right
+    if use_multi_band and (beat_phase is None or beat_phase < 0.2 or beat_phase > 0.8):
+        # Use multi-band when not on a critical beat (allows more flexibility)
+        try:
+            from pymusiclooper.transitions_advanced import multi_band_zero_crossing
+            return multi_band_zero_crossing(audio, sr, target, n_bands=3)
+        except Exception:
+            pass  # Fallback to standard method
+    
+    from pymusiclooper.analysis.constants import (
+        compute_adaptive_zero_crossing_window,
+        ZERO_CROSSING_SEARCH_MS_BASE,
+        ZERO_CROSSING_MAX_SHIFT_RATIO
+    )
+    
+    # Compute adaptive search window
+    if beat_phase is not None and transient_strength is not None:
+        search_ms = compute_adaptive_zero_crossing_window(beat_phase, transient_strength)
+    elif beat_phase is not None:
+        search_ms = compute_adaptive_zero_crossing_window(beat_phase, 0.0)
+    else:
+        search_ms = ZERO_CROSSING_SEARCH_MS_BASE
+    
     search_samples = int(sr * search_ms / 1000)
+    
+    # Ensure minimum search window for low sample rates
+    search_samples = max(8, search_samples)
     
     start = max(0, target - search_samples)
     end = min(len(audio), target + search_samples)
@@ -419,6 +469,7 @@ def nearest_zero_crossing(audio: np.ndarray, sr: int, target: int) -> int:
     if len(mono) < 2:
         return target
     
+    # Find zero crossings
     signs = np.sign(mono)
     crossings = np.where(np.diff(signs) != 0)[0]
     
@@ -426,7 +477,22 @@ def nearest_zero_crossing(audio: np.ndarray, sr: int, target: int) -> int:
         return target
     
     relative_target = target - start
-    closest_idx = crossings[np.argmin(np.abs(crossings - relative_target))]
+    
+    # Find closest crossing, but prefer ones that don't shift too much
+    distances = np.abs(crossings - relative_target)
+    closest_idx = crossings[np.argmin(distances)]
+    
+    # If the shift is too large, prefer staying closer to target (preserve rhythm)
+    max_acceptable_shift = search_samples * ZERO_CROSSING_MAX_SHIFT_RATIO
+    if abs(closest_idx - relative_target) > max_acceptable_shift:
+        # Check if there's a crossing closer to target
+        acceptable = crossings[np.abs(crossings - relative_target) <= max_acceptable_shift]
+        if len(acceptable) > 0:
+            closest_idx = acceptable[np.argmin(np.abs(acceptable - relative_target))]
+        else:
+            # If no acceptable crossing, return target to preserve rhythm
+            # This is especially important for drums
+            return target
     
     return start + closest_idx
 

@@ -19,6 +19,20 @@ from scipy.ndimage import uniform_filter1d
 if TYPE_CHECKING:
     from pymusiclooper.analysis.features import Features
 
+from pymusiclooper.analysis.constants import (
+    CHROMA_SIM_MIN,
+    MFCC_SIM_MIN,
+    MFCC_SIM_ACCEPTABLE,
+    COMBINED_SIM_MIN,
+    ONSET_SIM_MIN,
+    SIM_WEIGHT_CHROMA,
+    SIM_WEIGHT_MFCC,
+    SIM_WEIGHT_ONSET,
+    MFCC_CONTEXT_WINDOW,
+    ONSET_CONTEXT_WINDOW,
+    compute_adaptive_timbre_threshold
+)
+
 
 @dataclass(slots=True)
 class LoopPair:
@@ -70,7 +84,35 @@ def find_candidates(
             unique.append(c)
             existing.add(key)
     
-    return unique
+    # Final timbre filtering - reject candidates with very different timbre
+    # This catches cases like guitar at start but no guitar at end
+    # Use adaptive threshold for drums-heavy music
+    filtered = []
+    avg_transient = np.mean(feat.transient_strength) if len(feat.transient_strength) > 0 else 0.3
+    adaptive_threshold = compute_adaptive_timbre_threshold(avg_transient)
+    
+    for c in unique:
+        f1 = min(c._loop_start_frame_idx, feat.n_frames - 1)
+        f2 = min(c._loop_end_frame_idx, feat.n_frames - 1)
+        
+        # Check MFCC similarity in context window
+        window = min(MFCC_CONTEXT_WINDOW, feat.n_frames // 100)
+        mfcc_start = feat.mfcc[:, max(0, f1-window):min(feat.n_frames, f1+window)]
+        mfcc_end = feat.mfcc[:, max(0, f2-window):min(feat.n_frames, f2+window)]
+        
+        if mfcc_start.shape[1] > 0 and mfcc_end.shape[1] > 0:
+            mfcc1_avg = np.mean(mfcc_start, axis=1)
+            mfcc2_avg = np.mean(mfcc_end, axis=1)
+            mfcc_sim = np.dot(mfcc1_avg, mfcc2_avg) / (np.linalg.norm(mfcc1_avg) * np.linalg.norm(mfcc2_avg) + 1e-10)
+            
+            # Only keep if timbre is reasonably similar (adaptive threshold)
+            if mfcc_sim >= MFCC_SIM_ACCEPTABLE:
+                filtered.append(c)
+        else:
+            # If we can't check, keep it (edge case)
+            filtered.append(c)
+    
+    return filtered
 
 
 def _ssm_candidates(
@@ -175,15 +217,69 @@ def _beat_candidates(feat: Features, min_frames: int, max_frames: int) -> list[L
             if loop_len > max_frames:
                 break
             
-            # Quick chroma similarity check
+            # Multi-feature similarity check (chroma + timbre + onset pattern)
             f1 = min(int(beats[i]), feat.n_frames - 1)
             f2 = min(int(beats[j]), feat.n_frames - 1)
+            
+            # 1. Chroma similarity (harmonic content)
             c1 = feat.chroma_cens[:, f1]
             c2 = feat.chroma_cens[:, f2]
+            chroma_sim = np.dot(c1, c2) / (np.linalg.norm(c1) * np.linalg.norm(c2) + 1e-10)
             
-            sim = np.dot(c1, c2) / (np.linalg.norm(c1) * np.linalg.norm(c2) + 1e-10)
+            if chroma_sim < CHROMA_SIM_MIN:
+                continue
             
-            if sim < 0.4:
+            # 2. MFCC similarity (timbre/instruments) - check context window
+            window = min(MFCC_CONTEXT_WINDOW, feat.n_frames // 100)
+            mfcc_start = feat.mfcc[:, max(0, f1-window):min(feat.n_frames, f1+window)]
+            mfcc_end = feat.mfcc[:, max(0, f2-window):min(feat.n_frames, f2+window)]
+            
+            if mfcc_start.shape[1] > 0 and mfcc_end.shape[1] > 0:
+                # Vectorized: mean along time axis, then cosine similarity
+                mfcc1_avg = np.mean(mfcc_start, axis=1)
+                mfcc2_avg = np.mean(mfcc_end, axis=1)
+                # Use np.dot and np.linalg.norm for vectorized cosine similarity
+                mfcc_sim = np.dot(mfcc1_avg, mfcc2_avg) / (np.linalg.norm(mfcc1_avg) * np.linalg.norm(mfcc2_avg) + 1e-10)
+            else:
+                mfcc_sim = 0.5
+            
+            # 3. Onset pattern similarity (where notes/instruments start)
+            # Check if onset patterns match - if guitar starts at beginning but not at end, this will catch it
+            onset_window = min(ONSET_CONTEXT_WINDOW, feat.n_frames // 50)
+            onset_start = feat.onset_env[max(0, f1-onset_window):min(feat.n_frames, f1+onset_window)]
+            onset_end = feat.onset_env[max(0, f2-onset_window):min(feat.n_frames, f2+onset_window)]
+            
+            if len(onset_start) > 5 and len(onset_end) > 5:
+                # Normalize and compare patterns
+                onset_start_norm = (onset_start - np.mean(onset_start)) / (np.std(onset_start) + 1e-10)
+                onset_end_norm = (onset_end - np.mean(onset_end)) / (np.std(onset_end) + 1e-10)
+                
+                min_len = min(len(onset_start_norm), len(onset_end_norm))
+                if min_len > 5:
+                    onset_corr = np.corrcoef(onset_start_norm[:min_len], onset_end_norm[:min_len])[0, 1]
+                    onset_sim = max(0, onset_corr) if not np.isnan(onset_corr) else ONSET_SIM_MIN
+                else:
+                    onset_sim = 0.5
+            else:
+                onset_sim = 0.5
+            
+            # Combined similarity - require reasonable match
+            combined_sim = (
+                chroma_sim * SIM_WEIGHT_CHROMA + 
+                mfcc_sim * SIM_WEIGHT_MFCC + 
+                onset_sim * SIM_WEIGHT_ONSET
+            )
+            
+            # Moderate threshold - allow some variation
+            if combined_sim < COMBINED_SIM_MIN:
+                continue
+            
+            # Additional check: if timbre is very different, reject
+            # Use adaptive threshold based on transient strength (for drums)
+            avg_transient = (feat.transient_strength[f1] + feat.transient_strength[f2]) / 2
+            adaptive_mfcc_threshold = compute_adaptive_timbre_threshold(avg_transient)
+            
+            if mfcc_sim < adaptive_mfcc_threshold:
                 continue
             
             ps = power[min(int(beats[i]), len(power) - 1)]
@@ -192,7 +288,7 @@ def _beat_candidates(feat: Features, min_frames: int, max_frames: int) -> list[L
             candidates.append(LoopPair(
                 _loop_start_frame_idx=int(beats[i]),
                 _loop_end_frame_idx=int(beats[j]),
-                note_distance=1.0 - sim,
+                note_distance=1.0 - combined_sim,  # Use combined_sim instead of undefined sim
                 loudness_difference=abs(ps - pe),
             ))
     

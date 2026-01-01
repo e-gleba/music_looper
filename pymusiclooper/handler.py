@@ -79,14 +79,17 @@ class LoopHandler:
     def format_time(self, samples: int, in_samples: bool = False):
         return samples if in_samples else self.musiclooper.samples_to_ftime(samples)
 
-    def play_looping(self, loop_start: int, loop_end: int):
-        self.musiclooper.play_looping(loop_start, loop_end)
+    def play_looping(self, loop_start: int, loop_end: int, start_from: int = 0):
+        self.musiclooper.play_looping(loop_start, loop_end, start_from=start_from)
 
     def choose_loop_pair(self, interactive_mode=False):
         index = 0
         if self.loop_pair_list and interactive_mode:
             with _hideprogressbar(self._progressbar):
                 index = self.interactive_handler()
+                # If user chose to exit (None), raise exception to stop execution
+                if index is None:
+                    raise KeyboardInterrupt("User exited interactive mode")
 
         return self.loop_pair_list[index]
 
@@ -161,6 +164,7 @@ class LoopHandler:
             cmd_table.add_row("more", "Show more loops")
             cmd_table.add_row("all", "Show all loops")
             cmd_table.add_row("reset", "Reset to default view")
+            cmd_table.add_row("q/exit", "Quit")
             rich_console.print(cmd_table)
         rich_console.print()
 
@@ -170,6 +174,8 @@ class LoopHandler:
                 idx = 0
                 preview = False
 
+                if num_input.lower() in ('q', 'quit', 'exit'):
+                    return None
                 if num_input == "more":
                     return self.interactive_handler(show_top=show_top * 2)
                 if num_input == "all":
@@ -203,29 +209,35 @@ class LoopHandler:
                     # start preview 5 seconds before the looping point
                     offset = preview_looper.seconds_to_samples(5)
                     preview_offset = loop_end - offset if loop_end - offset > 0 else 0
-                    preview_looper.play_looping(loop_start, loop_end, start_from=preview_offset)
+                    try:
+                        preview_looper.play_looping(loop_start, loop_end, start_from=preview_offset)
+                    except KeyboardInterrupt:
+                        rich_console.print("\n[dim]Stopped playback[/]")
+                        # Return to input prompt, don't restart playback - just ask again
+                        return get_user_input()
+                    # If playback completed normally, ask again
                     return get_user_input()
                 else:
                     return idx
 
             except (ValueError, IndexError):
-                rich_console.print(f"[red]✗[/] Enter a number in range 0-{len(self.loop_pair_list)-1}")
+                rich_console.print(f"[red]✗[/] Enter a number in range 0-{len(self.loop_pair_list)-1}, or 'q'/'exit' to quit")
                 return get_user_input()
             except KeyboardInterrupt:
-                rich_console.print("\n[dim]Stopped[/]")
-                return get_user_input()
+                rich_console.print("\n[dim]Exiting...[/]")
+                return None
 
         try:
             selected_index = get_user_input()
 
             if selected_index is None:
-                rich_console.print("[red]✗[/] Please select a valid number")
-                return get_user_input()
+                # User chose to exit - return None to signal exit
+                return None
 
             return selected_index
         except KeyboardInterrupt:
             rich_console.print("\n[yellow]⚠[/] Operation cancelled")
-            sys.exit()
+            return None  # Signal exit instead of sys.exit()
 
 
 class LoopExportHandler(LoopHandler):

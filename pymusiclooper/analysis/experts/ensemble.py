@@ -26,6 +26,14 @@ from pymusiclooper.analysis.experts.phrase import PhraseExpert
 from pymusiclooper.analysis.experts.melodic import MelodicExpert
 from pymusiclooper.analysis.experts.spectral import SpectralExpert
 from pymusiclooper.analysis.experts.crossfade import CrossfadeExpert
+from pymusiclooper.analysis.experts.microtiming import MicrotimingExpert
+from pymusiclooper.analysis.experts.energy_flow import EnergyFlowExpert
+from pymusiclooper.analysis.experts.resonance import ResonanceExpert
+from pymusiclooper.analysis.experts.texture import TextureExpert
+from pymusiclooper.analysis.experts.continuity import ContinuityExpert
+from pymusiclooper.analysis.experts.vocal import VocalExpert
+from pymusiclooper.analysis.experts.ensemble_instruments import EnsembleInstrumentsExpert
+from pymusiclooper.analysis.experts.transition_effects import TransitionEffectsExpert
 
 if TYPE_CHECKING:
     from pymusiclooper.analysis.features import Features
@@ -33,13 +41,13 @@ if TYPE_CHECKING:
 
 class ExpertEnsemble:
     """
-    11-Expert Ensemble with adaptive weighting and rhythm gating.
+    16-Expert Ensemble with adaptive weighting and rhythm gating.
     
     The ensemble combines specialized experts with a meta-learner
     that adjusts weights per composition. A gating mechanism ensures
     rhythm alignment is never compromised.
     
-    Experts:
+    Core Experts:
     0. HarmonicExpert    - Tonal/harmonic transitions
     1. RhythmExpert      - Beat/timing precision (HIGH weight)
     2. TimbreExpert      - Spectral continuity
@@ -48,13 +56,23 @@ class ExpertEnsemble:
     5. DynamicsExpert    - Energy flow
     6. OnsetExpert       - Transient handling (HIGH weight)
     7. PhraseExpert      - Musical structure
-    8. MelodicExpert     - Melodic contour
+    8. MelodicExpert  - Melodic contour
     9. SpectralExpert    - Deep spectral analysis
     10. CrossfadeExpert  - Waveform quality
+    
+    Organic Flow Experts (NEW):
+    11. MicrotimingExpert - Groove, swing, micro-timing
+    12. EnergyFlowExpert  - Energy envelope continuity
+    13. ResonanceExpert  - Formant and resonance analysis
+    14. TextureExpert     - Spectral texture and density
+    15. ContinuityExpert  - Overall seamlessness (HIGH weight)
+    16. VocalExpert       - Vocal pause and word boundary detection (HIGH weight)
+    17. EnsembleInstrumentsExpert - Ensemble instrument continuity (HIGH weight)
+    18. TransitionEffectsExpert - Transition effects optimization (HIGH weight)
     """
     
     def __init__(self):
-        # Initialize all 11 experts
+        # Initialize all 19 experts
         self.experts: list[Expert] = [
             HarmonicExpert(),      # 0
             RhythmExpert(),        # 1
@@ -67,6 +85,14 @@ class ExpertEnsemble:
             MelodicExpert(),       # 8
             SpectralExpert(),      # 9
             CrossfadeExpert(),     # 10
+            MicrotimingExpert(),   # 11
+            EnergyFlowExpert(),    # 12
+            ResonanceExpert(),    # 13
+            TextureExpert(),      # 14
+            ContinuityExpert(),    # 15
+            VocalExpert(),        # 16
+            EnsembleInstrumentsExpert(),  # 17
+            TransitionEffectsExpert(),  # 18
         ]
         
         # Base weights (can be overridden by meta-learner)
@@ -106,8 +132,9 @@ class ExpertEnsemble:
         rhythm_score = expert_scores[1]   # RhythmExpert is index 1
         onset_score = expert_scores[6]    # OnsetExpert is index 6
         melodic_score = expert_scores[8] if len(expert_scores) > 8 else 1.0  # MelodicExpert
+        continuity_score = expert_scores[15] if len(expert_scores) > 15 else 1.0  # ContinuityExpert
         
-        gate = self._compute_gate(rhythm_score, onset_score, melodic_score)
+        gate = self._compute_gate(rhythm_score, onset_score, melodic_score, continuity_score)
         
         return float(combined * gate)
     
@@ -127,13 +154,19 @@ class ExpertEnsemble:
         
         return scores
     
-    def _compute_gate(self, rhythm_score: float, onset_score: float, melodic_score: float = 1.0) -> float:
+    def _compute_gate(
+        self, 
+        rhythm_score: float, 
+        onset_score: float, 
+        melodic_score: float = 1.0,
+        continuity_score: float = 1.0
+    ) -> float:
         """
         Compute gating multiplier based on critical scores.
         
         Rhythm and onset alignment are critical - bad values in these
         areas should significantly reduce the overall score.
-        Melodic continuity is also considered.
+        Melodic continuity and overall continuity are also considered.
         """
         gate = 1.0
         
@@ -150,6 +183,12 @@ class ExpertEnsemble:
         # Melodic penalty (less severe)
         if melodic_score < 0.3:
             gate *= 0.7 + melodic_score
+        
+        # Continuity gate (important for seamlessness)
+        if continuity_score < 0.4:
+            gate *= 0.3 + continuity_score * 0.7
+        elif continuity_score < 0.6:
+            gate *= 0.6 + continuity_score * 0.4
         
         return gate
     
@@ -194,10 +233,8 @@ class ExpertEnsemble:
             try:
                 ctx = TransitionContext.from_features(feat, start_frame, end_frame)
                 
-                # Get expert scores
-                expert_scores = np.array([
-                    expert.score(ctx) for expert in self.experts
-                ], dtype=np.float32)
+                # Get expert scores - vectorized
+                expert_scores = np.array([expert.score(ctx) for expert in self.experts], dtype=np.float32)
                 
                 samples.append(expert_scores)
                 
@@ -215,9 +252,12 @@ class ExpertEnsemble:
         X = np.array(samples, dtype=np.float32)
         y = np.array(targets, dtype=np.float32)
         
-        # Simple gradient descent to learn optimal weights
+        # Improved gradient descent with adaptive learning rate
         weights = self.base_weights.copy()
-        lr = 0.01
+        lr = 0.02  # Slightly higher initial learning rate
+        best_loss = float('inf')
+        patience = 10
+        no_improve = 0
         
         for epoch in range(epochs):
             # Predictions
@@ -225,6 +265,21 @@ class ExpertEnsemble:
             
             # MSE loss
             error = pred - y
+            loss = np.mean(error ** 2)
+            
+            # Early stopping if no improvement
+            if loss < best_loss:
+                best_loss = loss
+                no_improve = 0
+            else:
+                no_improve += 1
+                if no_improve >= patience:
+                    logging.debug(f"Early stopping at epoch {epoch}")
+                    break
+            
+            # Adaptive learning rate
+            if epoch > 0 and epoch % 20 == 0:
+                lr *= 0.9  # Decay learning rate
             
             # Gradient
             grad = 2 * X.T @ error / len(y)
