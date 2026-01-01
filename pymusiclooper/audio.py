@@ -48,7 +48,9 @@ class MLAudio:
             raise AudioLoadError(f"\"{filepath}\" only contains silence and cannot be analyzed.")
 
         # Normalize audio channels to between -1.0 and +1.0 before analysis
-        mono_signal /= np.max(np.abs(mono_signal))
+        max_abs = np.max(np.abs(mono_signal))
+        if max_abs > 1e-10:  # Avoid division by zero
+            mono_signal /= max_abs
 
         self.audio, self.trim_offset = librosa.effects.trim(mono_signal, top_db=40)
         self.trim_offset = self.trim_offset[0]

@@ -7,6 +7,7 @@ import warnings
 import rich_click as click
 from rich.logging import RichHandler
 from rich.progress import Progress, SpinnerColumn, TimeElapsedColumn
+from rich.table import Table
 from rich.traceback import install as rich_traceback_handler
 from rich_click.patch import patch as rich_click_patch
 from yt_dlp.utils import YoutubeDLError
@@ -16,6 +17,8 @@ from click_option_group import RequiredMutuallyExclusiveOptionGroup, optgroup
 from click_params import URL as UrlParamType
 
 from pymusiclooper import __version__
+from pymusiclooper.analysis import extract_features
+from pymusiclooper.multihop import MultiHopLoop, find_multi_hop_loops
 from pymusiclooper.console import _COMMAND_GROUPS, _OPTION_GROUPS, rich_console
 from pymusiclooper.core import MusicLooper
 from pymusiclooper.exceptions import AudioLoadError, LoopNotFoundError
@@ -224,6 +227,241 @@ def export_points(**kwargs):
 def tag(**kwargs):
     """Adds metadata tags of loop points to a copy of the input audio file(s)."""
     run_handler(**kwargs)
+
+
+@cli_main.command()
+@click.option('--path', type=click.Path(exists=True), required=True, help='Path to the audio file.')
+@click.option('--n-hops', type=click.IntRange(min=2, max=10), default=2, show_default=True, help='Number of transition points in the loop chain. 2=A->B->A, 3=A->B->C->A, etc.')
+@click.option('--min-segment-duration', type=click.FloatRange(min=1.0), default=4.0, show_default=True, help='Minimum segment duration in seconds.')
+@click.option('--max-segment-duration', type=click.FloatRange(min=1.0), default=None, help='Maximum segment duration in seconds.')
+def multi_hop(**kwargs):
+    """Find multi-hop loop chains with multiple seamless transitions.
+    
+    Instead of one loop point (start -> end -> start), finds a chain of
+    segments that transition seamlessly into each other.
+    
+    Example with n_hops=2: Play intro, then loop A->B->A repeatedly.
+    
+    Example with n_hops=3: Play intro, then loop A->B->C->A repeatedly.
+    """
+    try:
+        path = kwargs["path"]
+        n_hops = kwargs["n_hops"]
+        min_seg = kwargs["min_segment_duration"]
+        max_seg = kwargs["max_segment_duration"]
+        
+        with Progress(
+            SpinnerColumn(),
+            *Progress.get_default_columns(),
+            TimeElapsedColumn(),
+            console=rich_console,
+            transient=True
+        ) as progress:
+            task = progress.add_task("Extracting features...", total=None)
+            looper = MusicLooper(path)
+            from pymusiclooper.analysis import extract_features
+            features = extract_features(looper.mlaudio, None, None, False)
+            
+            progress.update(task, description="Finding similar sections...")
+            chains = find_multi_hop_loops(
+                looper.mlaudio,
+                features,
+                n_hops=n_hops,
+                min_segment_duration=min_seg,
+                max_segment_duration=max_seg,
+            )
+        
+        if not chains:
+            rich_console.print("[yellow]No multi-hop chains found. Try adjusting parameters or use single-loop mode.[/]")
+            return
+        
+        # Display results
+        in_samples = "PML_DISPLAY_SAMPLES" in os.environ
+        
+        rich_console.print(f"\n[bold]Multi-hop chains for \"{os.path.basename(path)}\":[/]\n")
+        
+        table = Table(title=f"Top {min(10, len(chains))} chains (n_hops={n_hops})")
+        table.add_column("Index", justify="right", style="cyan")
+        table.add_column("Segments", style="magenta")
+        table.add_column("Transitions", style="green")
+        table.add_column("Score", justify="right", style="red")
+        
+        for idx, chain in enumerate(chains[:10]):
+            seg_strs = []
+            for start_s, end_s in chain.segment_samples:
+                if in_samples:
+                    seg_strs.append(f"{start_s}->{end_s}")
+                else:
+                    seg_strs.append(f"{looper.samples_to_ftime(start_s)}->{looper.samples_to_ftime(end_s)}")
+            
+            trans_strs = [f"{t:.2f}" for t in chain.transitions]
+            
+            table.add_row(
+                str(idx),
+                " | ".join(seg_strs),
+                ", ".join(trans_strs),
+                f"{chain.total_score:.2%}",
+            )
+        
+        rich_console.print(table)
+        
+        # Show best chain details
+        best = chains[0]
+        rich_console.print(f"\n[bold green]Best chain (score: {best.total_score:.2%}):[/]")
+        rich_console.print("Playback order:")
+        for i, (start_s, end_s) in enumerate(best.segment_samples):
+            if in_samples:
+                rich_console.print(f"  Segment {i+1}: {start_s} -> {end_s}")
+            else:
+                rich_console.print(f"  Segment {i+1}: {looper.samples_to_ftime(start_s)} -> {looper.samples_to_ftime(end_s)}")
+        rich_console.print(f"  [dim](Then loops back to Segment 1)[/]")
+        
+        # Interactive preview
+        if "PML_INTERACTIVE_MODE" in os.environ:
+            rich_console.print("\n[bold cyan]Interactive Mode[/]")
+            rich_console.print("[dim]Commands:[/]")
+            rich_console.print("  [cyan]<number>[/] - Preview chain (e.g. 0)")
+            rich_console.print("  [cyan]p<number>[/] - Preview with info (e.g. p0)")
+            rich_console.print("  [cyan>more[/] - Show more chains")
+            rich_console.print("  [cyan]q[/] - Quit\n")
+            
+            show_top = 10
+            while True:
+                try:
+                    user_input = rich_console.input("[bold]> [/]").strip()
+                    
+                    if user_input.lower() == 'q':
+                        break
+                    elif user_input.lower() == 'more':
+                        show_top = min(len(chains), show_top + 10)
+                        # Re-display table
+                        table = Table(title=f"Top {show_top} chains (n_hops={n_hops})")
+                        table.add_column("Index", justify="right", style="cyan")
+                        table.add_column("Segments", style="magenta")
+                        table.add_column("Transitions", style="green")
+                        table.add_column("Score", justify="right", style="red")
+                        
+                        for idx, chain in enumerate(chains[:show_top]):
+                            seg_strs = []
+                            for start_s, end_s in chain.segment_samples:
+                                if in_samples:
+                                    seg_strs.append(f"{start_s}->{end_s}")
+                                else:
+                                    seg_strs.append(f"{looper.samples_to_ftime(start_s)}->{looper.samples_to_ftime(end_s)}")
+                            
+                            trans_strs = [f"{t:.2f}" for t in chain.transitions]
+                            table.add_row(str(idx), " | ".join(seg_strs), ", ".join(trans_strs), f"{chain.total_score:.2%}")
+                        
+                        rich_console.print(table)
+                        continue
+                    
+                    preview = user_input.lower().startswith('p')
+                    if preview:
+                        user_input = user_input[1:]
+                    
+                    idx = int(user_input)
+                    if 0 <= idx < len(chains):
+                        chain = chains[idx]
+                        
+                        if preview:
+                            rich_console.print(f"\n[bold]Chain #{idx} Details:[/]")
+                            rich_console.print(f"  Score: [green]{chain.total_score:.2%}[/]")
+                            rich_console.print(f"  Segments: [cyan]{len(chain.segment_samples)}[/]")
+                            rich_console.print(f"  Transitions: {', '.join([f'{t:.2f}' for t in chain.transitions])}")
+                            rich_console.print(f"\n  [bold]Playback order:[/]")
+                            for i, (start_s, end_s) in enumerate(chain.segment_samples):
+                                dur = looper.samples_to_seconds(end_s - start_s)
+                                if in_samples:
+                                    rich_console.print(f"    Seg{i+1}: {start_s} -> {end_s} ({dur:.2f}s)")
+                                else:
+                                    rich_console.print(f"    Seg{i+1}: {looper.samples_to_ftime(start_s)} -> {looper.samples_to_ftime(end_s)} ({dur:.2f}s)")
+                            rich_console.print(f"    [dim]→ Loop back to Seg1[/]\n")
+                        
+                        rich_console.print(f"[bold green]Playing chain #{idx}...[/] [dim](Press Ctrl+C to stop)[/]")
+                        # Play all segments in sequence, looping
+                        looper.play_multi_hop(chain.segment_samples)
+                    else:
+                        rich_console.print(f"[red]Index must be 0-{len(chains)-1}[/]")
+                except ValueError:
+                    rich_console.print("[red]Invalid input. Enter a number, 'p<number>', 'more', or 'q'[/]")
+                except KeyboardInterrupt:
+                    rich_console.print("\n[dim]Stopped preview[/]")
+                    
+    except (AudioLoadError, LoopNotFoundError, Exception) as e:
+        print_exception(e)
+
+
+@cli_main.command()
+@click.option('--path', type=click.Path(exists=True), required=True, help='Path to the audio file.')
+@click.option('--n-hops', type=click.IntRange(min=2, max=10), default=2, show_default=True, help='Number of transition points.')
+@click.option('--min-segment-duration', type=click.FloatRange(min=1.0), default=4.0, show_default=True, help='Minimum segment duration in seconds.')
+@click.option('--max-segment-duration', type=click.FloatRange(min=1.0), default=None, help='Maximum segment duration in seconds.')
+@click.option('--output-dir', '-o', type=click.Path(exists=False, writable=True, file_okay=False), help="Output directory for the export.")
+@click.option('--top', type=int, default=1, show_default=True, help='Export top N chains.')
+def export_multi_hop(**kwargs):
+    """Export multi-hop loop chain points to a text file."""
+    try:
+        path = kwargs["path"]
+        n_hops = kwargs["n_hops"]
+        min_seg = kwargs["min_segment_duration"]
+        max_seg = kwargs["max_segment_duration"]
+        output_dir = kwargs.get("output_dir") or os.path.dirname(path) or "."
+        top_n = kwargs["top"]
+        
+        with Progress(
+            SpinnerColumn(),
+            *Progress.get_default_columns(),
+            TimeElapsedColumn(),
+            console=rich_console,
+            transient=True
+        ) as progress:
+            task = progress.add_task("Extracting features...", total=None)
+            looper = MusicLooper(path)
+            from pymusiclooper.analysis import extract_features
+            features = extract_features(looper.mlaudio, None, None, False)
+            
+            progress.update(task, description="Finding similar sections...")
+            chains = find_multi_hop_loops(
+                looper.mlaudio,
+                features,
+                n_hops=n_hops,
+                min_segment_duration=min_seg,
+                max_segment_duration=max_seg,
+            )
+        
+        if not chains:
+            rich_console.print("[yellow]No multi-hop chains found.[/]")
+            return
+        
+        # Export to file
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        
+        filename = os.path.splitext(os.path.basename(path))[0]
+        out_path = os.path.join(output_dir, f"{filename}_multihop.txt")
+        
+        with open(out_path, "w") as f:
+            f.write(f"# Multi-hop loop chains for: {os.path.basename(path)}\n")
+            f.write(f"# n_hops: {n_hops}\n")
+            f.write(f"# Format: chain_index score segment1_start segment1_end [segment2_start segment2_end ...]\n\n")
+            
+            for idx, chain in enumerate(chains[:top_n]):
+                parts = [str(idx), f"{chain.total_score:.4f}"]
+                for start_s, end_s in chain.segment_samples:
+                    parts.extend([str(start_s), str(end_s)])
+                f.write(" ".join(parts) + "\n")
+        
+        rich_console.print(f"[green]Exported {min(top_n, len(chains))} multi-hop chains to:[/] {out_path}")
+        
+        # Also print best chain to stdout
+        best = chains[0]
+        rich_console.print(f"\n[bold]Best chain (score: {best.total_score:.2%}):[/]")
+        for i, (start_s, end_s) in enumerate(best.segment_samples):
+            rich_console.print(f"  Segment {i+1}: {start_s} -> {end_s} samples")
+            rich_console.print(f"            ({looper.samples_to_ftime(start_s)} -> {looper.samples_to_ftime(end_s)})")
+            
+    except (AudioLoadError, LoopNotFoundError, Exception) as e:
+        print_exception(e)
 
 
 def run_handler(**kwargs):

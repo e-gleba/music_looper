@@ -154,3 +154,112 @@ class PlaybackHandler:
             rich_console.print("[dim]Playback interrupted by user.[/]")
             # Restore default SIGINT handler
             signal.signal(signal.SIGINT, signal.default_int_handler)
+
+    def play_multi_hop(
+        self,
+        playback_data: np.ndarray,
+        samplerate: int,
+        n_channels: int,
+        segments: list,
+    ) -> None:
+        """Plays multiple segments in sequence, then loops back to the first.
+        
+        Args:
+            playback_data: Audio data array (samples, channels)
+            samplerate: Sample rate
+            n_channels: Number of channels
+            segments: List of (start_sample, end_sample) tuples
+        """
+        if not segments:
+            return
+            
+        self.loop_counter = 0
+        self.looping = True
+        self.current_segment_idx = 0
+        self.segments = segments
+        
+        # Start from first segment
+        first_start, first_end = segments[0]
+        self.current_frame = first_start
+        self.segment_end = first_end
+        
+        total_samples = playback_data.shape[0]
+
+        try:
+            def callback(outdata, frames, time, status):
+                remaining = frames
+                out_offset = 0
+                
+                while remaining > 0:
+                    # How much left in current segment
+                    seg_remaining = self.segment_end - self.current_frame
+                    
+                    if seg_remaining <= 0:
+                        # Move to next segment
+                        if self.looping:
+                            self.current_segment_idx = (self.current_segment_idx + 1) % len(self.segments)
+                            if self.current_segment_idx == 0:
+                                self.loop_counter += 1
+                                rich_console.print(f"[dim italic yellow]Loop #{self.loop_counter} - playing segment chain...[/]", end="\r")
+                        else:
+                            # Not looping, stop
+                            outdata[out_offset:] = 0
+                            raise sd().CallbackStop()
+                        
+                        seg_start, seg_end = self.segments[self.current_segment_idx]
+                        self.current_frame = seg_start
+                        self.segment_end = seg_end
+                        seg_remaining = seg_end - seg_start
+                    
+                    # Copy audio
+                    to_copy = min(remaining, seg_remaining)
+                    outdata[out_offset:out_offset + to_copy] = playback_data[self.current_frame:self.current_frame + to_copy]
+                    self.current_frame += to_copy
+                    out_offset += to_copy
+                    remaining -= to_copy
+
+            self.stream = sd().OutputStream(
+                samplerate=samplerate,
+                channels=n_channels,
+                callback=callback,
+                finished_callback=self.event.set,
+            )
+
+            with self.stream, self.progressbar:
+                # Initialize playback progress bar
+                total_chain_samples = sum(e - s for s, e in segments)
+                pbar = self.progressbar.add_task(
+                    f"Multi-hop ({len(segments)} segments)...",
+                    total=total_chain_samples,
+                    loop_field="",
+                    time_field="",
+                )
+
+                signal.signal(signal.SIGINT, self._loop_interrupt_handler)
+
+                while not self.event.wait(0.5):
+                    # Calculate progress within chain
+                    progress = 0
+                    for i, (s, e) in enumerate(self.segments):
+                        if i < self.current_segment_idx:
+                            progress += e - s
+                        elif i == self.current_segment_idx:
+                            progress += self.current_frame - s
+                    
+                    time_sec = progress / samplerate
+                    ftime = f"{time_sec // 60:02.0f}:{time_sec % 60:02.0f}"
+                    seg_info = f"Seg {self.current_segment_idx + 1}/{len(segments)}"
+                    self.progressbar.update(
+                        pbar,
+                        completed=progress,
+                        time_field=ftime,
+                        loop_field=(
+                            f"[dim] | {seg_info} | Loop #{self.loop_counter}[/]"
+                            if self.loop_counter
+                            else f"[dim] | {seg_info}[/]"
+                        ),
+                    )
+
+                signal.signal(signal.SIGINT, signal.default_int_handler)
+        except Exception as e:
+            logging.error(e)

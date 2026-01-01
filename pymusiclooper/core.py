@@ -111,6 +111,23 @@ class MusicLooper:
             start_from,
         )
 
+    def play_multi_hop(self, segments: List[Tuple[int, int]]):
+        """Plays multiple segments in sequence, then loops back to the first.
+        
+        Args:
+            segments: List of (start_sample, end_sample) tuples
+        """
+        if not segments:
+            return
+        
+        playback_handler = PlaybackHandler()
+        playback_handler.play_multi_hop(
+            self.mlaudio.playback_audio,
+            self.mlaudio.rate,
+            self.mlaudio.n_channels,
+            segments,
+        )
+
     def export(
         self,
         loop_start: int,
