@@ -6,12 +6,24 @@ from typing import List, Literal, Optional, Tuple
 
 from rich.progress import MofNCompleteColumn, Progress, SpinnerColumn, TimeElapsedColumn
 from rich.table import Table
+from rich.panel import Panel
+from rich.box import ROUNDED
 
 from pymusiclooper.analysis import LoopPair
-from pymusiclooper.console import rich_console
+from pymusiclooper.console import rich_console, STYLE_SCORE_HIGH, STYLE_SCORE_MED, STYLE_SCORE_LOW
 from pymusiclooper.core import MusicLooper
 from pymusiclooper.exceptions import AudioLoadError, LoopNotFoundError
 from pymusiclooper.utils import DEFAULT_OUTPUT_DIRECTORY_NAME
+
+
+def _score_style(score: float) -> str:
+    """Get Rich color style based on score value."""
+    if score >= 0.75:
+        return "bold green"
+    elif score >= 0.5:
+        return "yellow"
+    else:
+        return "red"
 
 
 class LoopHandler:
@@ -81,64 +93,91 @@ class LoopHandler:
     def interactive_handler(self, show_top=25):
         preview_looper = self.musiclooper
         total_candidates = len(self.loop_pair_list)
-        _display_more_hint_msg = "\nEnter 'more' to display additional loop points, 'all' to display all of them, or 'reset' to display the default amount." if show_top < total_candidates else ""
-        rich_console.print(f"Processing: \"{self.filepath}\"")
-        _discovered_points_msg = f"Discovered loop points\n({min(show_top, total_candidates)}/{total_candidates} displayed)"
-        table = Table(title=_discovered_points_msg, caption=_display_more_hint_msg)
-        table.add_column("Index", justify="right", style="cyan", no_wrap=True)
-        table.add_column("Loop Start", style="magenta")
-        table.add_column("Loop End", style="green")
-        table.add_column("Length", style="white")
-        table.add_column("Note Distance", style="yellow")
-        table.add_column("Loudness Difference", style="blue")
-        table.add_column("Score", justify="right", style="red")
+        filename = os.path.basename(self.filepath)
+        
+        # Header panel
+        rich_console.print()
+        rich_console.print(Panel(
+            f"[bold white]{filename}[/]\n"
+            f"[dim]Found {total_candidates} loop candidate(s)[/]",
+            title="[bold cyan]Loop Analysis[/]",
+            border_style="cyan",
+        ))
+        
+        # Results table
+        table = Table(
+            title=f"Showing {min(show_top, total_candidates)}/{total_candidates} loops",
+            box=ROUNDED,
+            header_style="bold cyan",
+            border_style="dim",
+        )
+        table.add_column("#", justify="right", style="dim", width=4)
+        table.add_column("Start", style="green", width=10)
+        table.add_column("End", style="green", width=10)
+        table.add_column("Duration", style="dim", width=10)
+        table.add_column("Note Δ", style="yellow", justify="right", width=8)
+        table.add_column("Loud Δ", style="blue", justify="right", width=8)
+        table.add_column("Score", justify="right", width=8)
 
         for idx, pair in enumerate(self.loop_pair_list[:show_top]):
             start_time = (
-                pair.loop_start
+                str(pair.loop_start)
                 if self.in_samples
                 else preview_looper.samples_to_ftime(pair.loop_start)
             )
             end_time = (
-                pair.loop_end
+                str(pair.loop_end)
                 if self.in_samples
                 else preview_looper.samples_to_ftime(pair.loop_end)
             )
             length = (
-                pair.loop_end - pair.loop_start
+                str(pair.loop_end - pair.loop_start)
                 if self.in_samples
                 else preview_looper.samples_to_ftime(pair.loop_end - pair.loop_start)
             )
             score = pair.score
-            loudness_difference = pair.loudness_difference
-            note_distance = pair.note_distance
+            score_style = _score_style(score)
+            
             table.add_row(
                 str(idx),
                 str(start_time),
                 str(end_time),
                 str(length),
-                f"{note_distance:.4f}",
-                f"{loudness_difference:.4f}",
-                f"{score:.2%}",
+                f"{pair.note_distance:.3f}",
+                f"{pair.loudness_difference:.3f}",
+                f"[{score_style}]{score:.1%}[/]",
             )
 
         rich_console.print(table)
+        
+        # Command hints
+        if show_top < total_candidates:
+            rich_console.print()
+            cmd_table = Table(show_header=False, box=None, padding=(0, 2))
+            cmd_table.add_column("Key", style="cyan bold", width=10)
+            cmd_table.add_column("Action", style="dim")
+            cmd_table.add_row("NUMBER", "Select loop (e.g., 0)")
+            cmd_table.add_row("NUMBERp", "Preview loop (e.g., 0p)")
+            cmd_table.add_row("more", "Show more loops")
+            cmd_table.add_row("all", "Show all loops")
+            cmd_table.add_row("reset", "Reset to default view")
+            rich_console.print(cmd_table)
         rich_console.print()
 
         def get_user_input():
             try:
-                num_input = rich_console.input("Enter the index number for the loop you'd like to use (append [cyan]p[/] to preview; e.g. [cyan]0p[/]):")
+                num_input = rich_console.input("[cyan bold]❯[/] ").strip()
                 idx = 0
                 preview = False
 
                 if num_input == "more":
-                    self.interactive_handler(show_top=show_top * 2)
+                    return self.interactive_handler(show_top=show_top * 2)
                 if num_input == "all":
-                    self.interactive_handler(show_top=total_candidates)
+                    return self.interactive_handler(show_top=total_candidates)
                 if num_input == "reset":
-                    self.interactive_handler()
+                    return self.interactive_handler()
 
-                if num_input[-1] == "p":
+                if num_input.endswith("p"):
                     idx = int(num_input[:-1])
                     preview = True
                 else:
@@ -148,9 +187,19 @@ class LoopHandler:
                     raise IndexError
 
                 if preview:
-                    rich_console.print(f"Previewing loop [cyan]#{idx}[/] | (Press [red]Ctrl+C[/] to stop looping):")
-                    loop_start = self.loop_pair_list[idx].loop_start
-                    loop_end = self.loop_pair_list[idx].loop_end
+                    pair = self.loop_pair_list[idx]
+                    dur_s = preview_looper.samples_to_seconds(pair.loop_end - pair.loop_start)
+                    rich_console.print(Panel(
+                        f"[bold]Loop #{idx}[/]\n"
+                        f"Start: [green]{preview_looper.samples_to_ftime(pair.loop_start)}[/] → "
+                        f"End: [green]{preview_looper.samples_to_ftime(pair.loop_end)}[/]\n"
+                        f"Duration: {dur_s:.1f}s │ Score: [{_score_style(pair.score)}]{pair.score:.1%}[/]",
+                        title="[bold green]▶ Preview[/]",
+                        subtitle="[dim]Ctrl+C to stop[/]",
+                        border_style="green",
+                    ))
+                    loop_start = pair.loop_start
+                    loop_end = pair.loop_end
                     # start preview 5 seconds before the looping point
                     offset = preview_looper.seconds_to_samples(5)
                     preview_offset = loop_end - offset if loop_end - offset > 0 else 0
@@ -160,19 +209,22 @@ class LoopHandler:
                     return idx
 
             except (ValueError, IndexError):
-                rich_console.print(f"Please enter a number within the range [0,{len(self.loop_pair_list)-1}].")
+                rich_console.print(f"[red]✗[/] Enter a number in range 0-{len(self.loop_pair_list)-1}")
+                return get_user_input()
+            except KeyboardInterrupt:
+                rich_console.print("\n[dim]Stopped[/]")
                 return get_user_input()
 
         try:
             selected_index = get_user_input()
 
             if selected_index is None:
-                rich_console.print("[red]Please select a valid number.[/]")
+                rich_console.print("[red]✗[/] Please select a valid number")
                 return get_user_input()
 
             return selected_index
         except KeyboardInterrupt:
-            rich_console.print("\n[red]Operation terminated by user. Exiting.[/]")
+            rich_console.print("\n[yellow]⚠[/] Operation cancelled")
             sys.exit()
 
 
@@ -276,11 +328,18 @@ class LoopExportHandler(LoopHandler):
                 format=self.format,
                 output_dir=self.output_directory
             )
-            message = f"Successfully exported \"{self.musiclooper.filename}\" intro/loop/outro sections to \"{self.output_directory}\""
             if self.batch_mode:
-                logging.info(message)
+                logging.info(f"Exported \"{self.musiclooper.filename}\" to \"{self.output_directory}\"")
             else:
-                rich_console.print(message)
+                rich_console.print(Panel(
+                    f"[bold green]✓ Export complete[/]\n\n"
+                    f"[dim]File:[/] {self.musiclooper.filename}\n"
+                    f"[dim]Output:[/] {self.output_directory}\n"
+                    f"[dim]Format:[/] {self.format}\n"
+                    f"[dim]Sections:[/] intro, loop, outro",
+                    title="[bold cyan]Split Audio[/]",
+                    border_style="green",
+                ))
         # Usually: unknown file format specified; raised by soundfile
         except ValueError as e:
             logging.error(e)
@@ -288,6 +347,7 @@ class LoopExportHandler(LoopHandler):
     def extend_track_runner(self, loop_start: int, loop_end: int):
         # Add a progress bar since it could take some time to export
         # Do not enable if batch mode is active, since it already has a progress bar
+        progress = None
         if not self.batch_mode:
             progress = Progress(
                 SpinnerColumn(),
@@ -296,7 +356,7 @@ class LoopExportHandler(LoopHandler):
                 console=rich_console,
                 transient=True,
             )
-            progress.add_task(f"Exporting an extended version of {self.musiclooper.filename}...", total=None)
+            progress.add_task(f"[cyan]Extending {self.musiclooper.filename}...", total=None)
             progress.start()
         try:
             output_path = self.musiclooper.extend(
@@ -308,14 +368,24 @@ class LoopExportHandler(LoopHandler):
                 disable_fade_out=self.disable_fade_out,
                 fade_length=self.fade_length,
             )
-            message = f'Successfully exported an extended version of "{self.musiclooper.filename}" to "{output_path}"'
             if self.batch_mode:
-                logging.info(message)
+                logging.info(f"Extended \"{self.musiclooper.filename}\" → \"{output_path}\"")
             else:
                 progress.stop()
-                rich_console.print(message)
+                fade_info = "disabled" if self.disable_fade_out else f"{self.fade_length}s"
+                rich_console.print(Panel(
+                    f"[bold green]✓ Extended track created[/]\n\n"
+                    f"[dim]Source:[/] {self.musiclooper.filename}\n"
+                    f"[dim]Output:[/] {output_path}\n"
+                    f"[dim]Length:[/] {self.extended_length}s\n"
+                    f"[dim]Fade out:[/] {fade_info}",
+                    title="[bold cyan]Extend Track[/]",
+                    border_style="green",
+                ))
         # Usually: unknown file format specified; raised by soundfile
         except ValueError as e:
+            if progress:
+                progress.stop()
             logging.error(e)
 
     def txt_export_runner(self, loop_start: int, loop_end: int):
@@ -328,21 +398,21 @@ class LoopExportHandler(LoopHandler):
                 output_dir=self.output_directory,
             )
             out_path = os.path.join(self.output_directory, "loop.txt")
-            message = f'Successfully added "{self.musiclooper.filename}" loop points to "{out_path}"'
             if self.batch_mode:
-                logging.info(message)
+                logging.info(f"Exported loop points for \"{self.musiclooper.filename}\"")
             else:
-                rich_console.print(message)
+                rich_console.print(f"[green]✓[/] Exported loop points → [cyan]{out_path}[/]")
 
     def stdout_export_runner(self, loop_start: int, loop_end: int):
         if self.alt_export_top != 0:
             self.alt_export_runner(mode="STDOUT")
         else:
-            rich_console.print(
-                f'\nLoop points for "{self.musiclooper.filename}":\n'
-                f"LOOP_START: {self._fmt(loop_start)}\n"
-                f"LOOP_END: {self._fmt(loop_end)}\n"
-            )
+            rich_console.print(Panel(
+                f"[bold]LOOP_START[/] = [green]{self._fmt(loop_start)}[/]\n"
+                f"[bold]LOOP_END[/]   = [green]{self._fmt(loop_end)}[/]",
+                title=f"[bold cyan]Loop Points: {self.musiclooper.filename}[/]",
+                border_style="cyan",
+            ))
 
     def alt_export_runner(self, mode: Literal["STDOUT", "TXT"]):
         pair_list_slice = (
@@ -375,11 +445,17 @@ class LoopExportHandler(LoopHandler):
             is_offset=self.tag_offset,
             output_dir=self.output_directory,
         )
-        message = f"Exported {loop_start_tag}: {loop_start} and {loop_end_tag}: {loop_end} of \"{self.musiclooper.filename}\" to a copy in \"{self.output_directory}\""
         if self.batch_mode:
-            logging.info(message)
+            logging.info(f"Tagged \"{self.musiclooper.filename}\" → {self.output_directory}")
         else:
-            rich_console.print(message)
+            rich_console.print(Panel(
+                f"[bold green]✓ Tags written[/]\n\n"
+                f"[cyan]{loop_start_tag}[/] = [green]{loop_start}[/]\n"
+                f"[cyan]{loop_end_tag}[/] = [green]{loop_end}[/]\n\n"
+                f"[dim]Output:[/] {self.output_directory}",
+                title=f"[bold cyan]Tag: {self.musiclooper.filename}[/]",
+                border_style="green",
+            ))
 
     def _fmt(self, samples: int):
         if self.fmt == "seconds":
