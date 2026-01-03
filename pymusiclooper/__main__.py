@@ -3,7 +3,7 @@ import logging
 from pymusiclooper.cli import cli_main
 
 
-def cli():
+def cli() -> None:
     try:
         cli_main(prog_name="pymusiclooper")
     except Exception as e:
