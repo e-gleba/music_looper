@@ -418,43 +418,50 @@ def _weights(length: int, start: int = 100, stop: int = 1):
 
 @njit(cache=True, fastmath=True)
 def nearest_zero_crossing(audio: np.ndarray, rate: int, sample_idx: int) -> int:
-    """Returns the best closest sample point at a rising zero crossing point.
+    """Finds the nearest rising zero crossing with minimal local amplitude.
 
-    Implementation of Audacity's 'At Zero Crossings' feature.
+    Simplified algorithm:
+    - Detects actual sign changes (zero crossings)
+    - Prefers rising crossings (negative→positive) for smoother splices
+    - Scores by: local amplitude + distance from target
     """
-    n_channels = audio.shape[1]
-    window_size = max(1, rate // 100)  # 1/100th of a second
-    offset = window_size // 2
+    n_samples, n_channels = audio.shape
+    window_size = max(2, rate // 100)  # ~10ms window
+    half_win = window_size // 2
 
-    # Sample window centered around sample_idx
-    start = max(0, sample_idx - offset)
-    end = min(audio.shape[0], sample_idx + offset)
-    sample_window = audio[start:end]
-    length = sample_window.shape[0]
+    start = max(0, sample_idx - half_win)
+    end = min(n_samples, sample_idx + half_win + 1)
 
-    # Offset correction for left-side clipping
-    offset_correction = max(0, offset - sample_idx)
-    pos_scale = 0.2 / window_size  # Simplified: 0.1 / (window_size / 2)
-
-    dist = np.zeros(length)
-
-    for channel in range(n_channels):
-        samples = sample_window[:, channel]
-        prev = 2.0
-
-        for i in range(length):
-            fdist = abs(samples[i])
-            if prev * samples[i] > 0:  # Same sign - no good
-                fdist += 0.4
-            elif prev > 0.0:  # Downward crossing - medium penalty
-                fdist += 0.1
-            prev = samples[i]
-            dist[i] += fdist + pos_scale * abs(i - offset + offset_correction)
-
-    argmin = np.argmin(dist)
-    threshold = 0.2 if n_channels == 1 else 0.6 * n_channels
-
-    if dist[argmin] > threshold:
+    if end - start < 2:
         return sample_idx
 
-    return sample_idx + argmin - offset + offset_correction
+    # Mix to mono for crossing detection
+    mono = audio[start:end, 0].copy()
+    for ch in range(1, n_channels):
+        mono += audio[start:end, ch]
+
+    center = sample_idx - start
+    best_idx, best_score = -1, np.inf
+
+    for i in range(1, len(mono)):
+        prev, curr = mono[i - 1], mono[i]
+
+        # Skip non-crossings (same sign)
+        if prev * curr > 0:
+            continue
+
+        # Score components (lower = better)
+        amplitude = (abs(prev) + abs(curr)) / n_channels  # Local amplitude
+        distance = 0.3 * abs(i - center) / half_win  # Distance penalty
+        falling = 0.15 if prev > 0 else 0.0  # Prefer rising crossings
+
+        score = amplitude + distance + falling
+
+        if score < best_score:
+            best_score, best_idx = score, i
+
+    # Reject if no crossing found or score too poor
+    if best_idx < 0 or best_score > 0.8 * n_channels:
+        return sample_idx
+
+    return start + best_idx
