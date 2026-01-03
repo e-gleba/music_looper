@@ -211,47 +211,64 @@ def _find_candidate_pairs(
 ) -> List[Tuple[int, int, float, float]]:
     """Generates a list of all valid candidate loop pairs."""
 
-    ACCEPTABLE_NOTE_DEVIATION = 0.0875
-    ACCEPTABLE_LOUDNESS_DIFFERENCE = 0.5
+    NOTE_THRESH = 0.0875
+    LOUDNESS_THRESH = 0.5
 
-    # Precompute arrays at beat indices (avoids repeated fancy indexing)
-    chroma_beats = chroma[:, beats]
+    # Precompute at beat indices (contiguous memory)
+    chroma_beats = np.ascontiguousarray(chroma[:, beats])
     power_beats = power_db[:, beats]
     n_beats = len(beats)
+    n_chroma = chroma_beats.shape[0]
 
-    # Deviation thresholds per beat (inlined _norm)
-    deviation = np.sqrt(np.sum((chroma_beats * ACCEPTABLE_NOTE_DEVIATION) ** 2, axis=0))
+    # Precompute all thresholds and power maxes upfront
+    deviation = np.empty(n_beats)
+    power_max = np.empty(n_beats)
+
+    for i in range(n_beats):
+        acc = 0.0
+        pmax = -np.inf
+        for j in range(n_chroma):
+            val = chroma_beats[j, i] * NOTE_THRESH
+            acc += val * val
+            if power_beats[j, i] > pmax:
+                pmax = power_beats[j, i]
+        deviation[i] = np.sqrt(acc)
+        power_max[i] = pmax
 
     candidate_pairs = []
 
     for end_idx in range(n_beats):
         loop_end = beats[end_idx]
-        chroma_end = chroma_beats[:, end_idx]
-        power_max_end = power_beats[:, end_idx].max()  # Hoist out of inner loop
         threshold = deviation[end_idx]
+        pmax_end = power_max[end_idx]
+
+        # Valid start range: loop_end - max_dur <= start <= loop_end - min_dur
+        min_valid_start = loop_end - max_loop_duration
+        max_valid_start = loop_end - min_loop_duration
 
         for start_idx in range(n_beats):
             loop_start = beats[start_idx]
-            loop_length = loop_end - loop_start
 
-            if loop_length < min_loop_duration:
-                break
-            if loop_length > max_loop_duration:
-                continue
+            if loop_start > max_valid_start:
+                break  # Sorted: all subsequent are too close
+            if loop_start < min_valid_start:
+                continue  # Too far apart
 
-            # Inlined _norm: np.dot is faster than np.sum(x**2)
-            diff = chroma_end - chroma_beats[:, start_idx]
-            note_distance = np.sqrt(np.dot(diff, diff))
+            # Inline norm: manual loop is faster in Numba than np.dot for small arrays
+            dist_sq = 0.0
+            for j in range(n_chroma):
+                d = chroma_beats[j, end_idx] - chroma_beats[j, start_idx]
+                dist_sq += d * d
+            note_distance = np.sqrt(dist_sq)
 
             if note_distance <= threshold:
-                # Inlined _db_diff
-                loudness_diff = abs(power_max_end - power_beats[:, start_idx].max())
+                loudness_diff = abs(pmax_end - power_max[start_idx])
 
-                if loudness_diff <= ACCEPTABLE_LOUDNESS_DIFFERENCE:
+                if loudness_diff <= LOUDNESS_THRESH:
                     candidate_pairs.append(
                         (
-                            int(loop_start),
-                            int(loop_end),
+                            loop_start,
+                            loop_end,
                             note_distance,
                             loudness_diff,
                         )
