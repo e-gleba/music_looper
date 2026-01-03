@@ -4,6 +4,7 @@ used for programmatic access to the CLI's main features."""
 import os
 import shutil
 from math import ceil
+from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
 import lazy_loader as lazy
@@ -16,8 +17,10 @@ from pymusiclooper.playback import PlaybackHandler
 # Lazy-load external libraries when they're needed
 soundfile = lazy.load("soundfile")
 
+
 class MusicLooper:
     """High-level API access to PyMusicLooper's main functions."""
+
     def __init__(self, filepath: str):
         """Initializes the MusicLooper object with the provided audio track.
 
@@ -46,7 +49,7 @@ class MusicLooper:
             approx_loop_end (float, optional): The approximate location of the desired loop end (in seconds). If specified, must specify approx_loop_start as well. Defaults to None.
             brute_force (bool, optional): Checks the entire track instead of the detected beats (disclaimer: runtime may be significantly longer). Defaults to False.
             disable_pruning (bool, optional): Returns all the candidate loop points without filtering. Defaults to False.
-        
+
         Raises:
             LoopNotFoundError: raised in case no loops were found
 
@@ -61,7 +64,7 @@ class MusicLooper:
             approx_loop_start=approx_loop_start,
             approx_loop_end=approx_loop_end,
             brute_force=brute_force,
-            disable_pruning=disable_pruning
+            disable_pruning=disable_pruning,
         )
 
     @property
@@ -74,7 +77,7 @@ class MusicLooper:
 
     def samples_to_frames(self, samples: int) -> int:
         return self.mlaudio.samples_to_frames(samples)
-    
+
     def samples_to_seconds(self, samples: int) -> float:
         return self.mlaudio.samples_to_seconds(samples)
 
@@ -89,7 +92,7 @@ class MusicLooper:
 
     def frames_to_ftime(self, frame: int) -> str:
         return self.mlaudio.frames_to_ftime(frame)
-    
+
     def samples_to_ftime(self, samples: int) -> str:
         return self.mlaudio.samples_to_ftime(samples)
 
@@ -116,7 +119,7 @@ class MusicLooper:
         loop_start: int,
         loop_end: int,
         format: str = "WAV",
-        output_dir: Optional[str] = None
+        output_dir: Optional[str] = None,
     ):
         """Exports the audio into three files: intro, loop and outro.
 
@@ -155,123 +158,103 @@ class MusicLooper:
         loop_start: int,
         loop_end: int,
         extended_length: float,
-        fade_length: float = 5,
+        fade_length: float = 5.0,
         disable_fade_out: bool = False,
         format: str = "WAV",
-        output_dir: Optional[str] = None,
+        output_dir: str | Path | None = None,
     ) -> str:
-        """Extends the audio by looping to at least the specified length.
-        Returns the path to the extended audio file. 
+        """Extends audio by looping to at least the specified length.
 
-        Args:
-            loop_start (int): Loop start in samples.
-            loop_end (int): Loop end in samples.
-            extended_length (float): Desired length of the extended audio in seconds.
-            fade_length (float, optional): Desired length of the extended audio's fade out in seconds.
-            disable_fade_out (bool, optional): Disable fading out from the loop section, and instead, includes the audio outro section . If `True`, `extended_length` will be treated as an 'at least' constraint.
-            format (str, optional): Audio format of the exported files (formats available depend on the `soundfile` library). Defaults to "WAV".
-            output_dir (str, optional): Path to the output directory. Defaults to the same directory as the source audio file.
+        Returns the path to the extended audio file.
         """
-        if output_dir is not None:
-            out_path = os.path.join(output_dir, self.mlaudio.filename)
-        else:
-            out_path = os.path.abspath(self.mlaudio.filepath)
+        audio = self.mlaudio.playback_audio
 
         if extended_length < self.mlaudio.total_duration:
-            raise ValueError(
-                "Extended length must be greater than the audio's original length."
-            )
+            raise ValueError("Extended length must exceed original audio duration.")
 
-        intro = self.mlaudio.playback_audio[:loop_start]
-        loop = self.mlaudio.playback_audio[loop_start:loop_end]
-        outro = self.mlaudio.playback_audio[loop_end:]
-
-        loop_extended_length = self.mlaudio.seconds_to_samples(extended_length) - intro.shape[0]
-
-        # If the outro will be included, account for its length when calculating the new loop duration
-        if disable_fade_out:
-            loop_extended_length -= outro.shape[0]
-
-        loop_factor = loop_extended_length / loop.shape[0]
-        left_over_multiplier = loop_factor - int(loop_factor)
-        extend_end_idx = loop_start + int(
-            (loop_end - loop_start) * left_over_multiplier
+        # Determine output path
+        out_path = (
+            Path(output_dir) / self.mlaudio.filename
+            if output_dir
+            else Path(self.mlaudio.filepath).resolve()
         )
 
-        # Modify the extended track's final loop section based on the fade out parameter
-        final_loop = self.mlaudio.playback_audio[loop_start:extend_end_idx].copy()
+        # Split audio sections
+        intro = audio[:loop_start]
+        loop = audio[loop_start:loop_end]
+        outro = audio[loop_end:]
+
+        # Calculate loop repetitions needed
+        target_samples = self.mlaudio.seconds_to_samples(extended_length) - len(intro)
         if disable_fade_out:
-            final_loop = loop
+            target_samples -= len(outro)
+
+        n_full_loops = int(target_samples // len(loop))
+        leftover_ratio = (target_samples / len(loop)) - n_full_loops
+        leftover_end = loop_start + int((loop_end - loop_start) * leftover_ratio)
+
+        # Build final loop section
+        if disable_fade_out:
+            final_section = loop
         else:
-            samples_to_fade = min(
-                self.mlaudio.seconds_to_samples(fade_length), final_loop.shape[0]
+            final_section = audio[loop_start:leftover_end].copy()
+            fade_samples = min(
+                self.mlaudio.seconds_to_samples(fade_length), len(final_section)
             )
-            final_loop[-samples_to_fade:] = (
-                final_loop[-samples_to_fade:]
-                * np.linspace(1, 0, samples_to_fade)[:, np.newaxis]
-            )
+            if fade_samples > 0:
+                fade = np.linspace(1, 0, fade_samples)[:, np.newaxis]
+                final_section[-fade_samples:] *= fade
 
-        # Format extended file name with its duration suffixed
-        extended_loop_length = final_loop.shape[0] + (
-            loop.shape[0] * (int(loop_factor))
-        )
-        extended_audio_length = (
-            intro.shape[0]
-            + extended_loop_length
-            + (outro.shape[0] if disable_fade_out else 0)
-        )
-        total_length_seconds = self.mlaudio.samples_to_seconds(extended_audio_length)
-        duration_sec = ceil(total_length_seconds%60)
-        duration_mins = int(total_length_seconds//60)
-        if duration_sec == 60:
-            duration_sec = 0
-            duration_mins += 1
-        extended_audio_length_fmt = (
-            f"{duration_mins:d}m{duration_sec:02d}s"
-        )
-        output_file_path = (
-            f"{out_path}-extended-{extended_audio_length_fmt}.{format.lower()}"
-        )
+        # Format output filename with duration
+        total_samples = len(intro) + (n_full_loops * len(loop)) + len(final_section)
+        if disable_fade_out:
+            total_samples += len(outro)
 
-        # Export with buffered write logic to avoid storing the entire extended audio in-memory
+        total_secs = int(self.mlaudio.samples_to_seconds(total_samples))
+        duration_str = f"{total_secs // 60}m{total_secs % 60:02d}s"
+        output_file = out_path.with_stem(
+            f"{out_path.stem}-extended-{duration_str}"
+        ).with_suffix(f".{format.lower()}")
+
+        # Buffered write (avoids loading full extended audio into memory)
+        dtype = str(audio.dtype)
         with soundfile.SoundFile(
-            output_file_path,
+            str(output_file),
             mode="w",
             samplerate=self.mlaudio.rate,
             channels=self.mlaudio.n_channels,
             format=format,
         ) as sf:
-            dtype = str(self.mlaudio.playback_audio.dtype)
             sf.buffer_write(intro.tobytes(order="C"), dtype)
-            for _ in range(int(loop_factor)):
+            for _ in range(n_full_loops):
                 sf.buffer_write(loop.tobytes(order="C"), dtype)
-            sf.buffer_write(final_loop.tobytes(order="C"), dtype)
+            sf.buffer_write(final_section.tobytes(order="C"), dtype)
             if disable_fade_out:
                 sf.buffer_write(outro.tobytes(order="C"), dtype)
 
-        # attempt to copy over the tags
+        # Copy metadata tags (best-effort)
+        self._copy_tags(output_file)
+
+        return str(output_file)
+
+    def _copy_tags(self, dest_path: Path) -> None:
+        """Attempt to copy audio tags from source to destination."""
         try:
             import taglib
-            original_tags = None
-            with taglib.File(self.filepath, save_on_exit=False) as src_file:
-                original_tags = src_file.tags
 
-            with taglib.File(output_file_path, save_on_exit=True) as dest_file:
-                for tag in original_tags:
-                    dest_file.tags[tag] = original_tags[tag]
+            with taglib.File(self.mlaudio.filepath, save_on_exit=False) as src:
+                tags = src.tags
+            with taglib.File(str(dest_path), save_on_exit=True) as dst:
+                dst.tags.update(tags)
         except Exception:
-            # silently ignore errors for now;
-            # TODO: implement logging for debugging
-            pass
-
-        return output_file_path
+            pass  # Silently ignore; tags are optional
 
     def export_txt(
         self,
         loop_start: Union[int, float, str],
         loop_end: Union[str, int, float, str],
         txt_name: str = "loops",
-        output_dir: Optional[str] = None
+        output_dir: Optional[str] = None,
     ):
         """Exports the given loop points to a text file named `loop.txt` in append mode with the format:
         `{loop_start} {loop_end} {filename}`
@@ -285,11 +268,12 @@ class MusicLooper:
         if output_dir is not None:
             out_path = os.path.join(output_dir, f"{txt_name}.txt")
         else:
-            out_path = os.path.join(os.path.dirname(self.mlaudio.filepath), f"{txt_name}.txt")
+            out_path = os.path.join(
+                os.path.dirname(self.mlaudio.filepath), f"{txt_name}.txt"
+            )
 
         with open(out_path, "a") as file:
             file.write(f"{loop_start} {loop_end} {self.mlaudio.filename}\n")
-
 
     def _find_start_tag(
         self,
@@ -299,46 +283,48 @@ class MusicLooper:
         # https://github.com/libsdl-org/SDL_mixer/blob/5175907b515ea9e07d0b35849bfaf09870d07d33/src/codecs/music_ogg.c#L289-L302
         # https://github.com/vgmstream/vgmstream/blob/02d3c3f875fb97b682c4479fe66c7e0a0eeee04d/src/meta/ogg_vorbis.c#L647-L675
         known_tags = [
-            'COMMENT=LOOPPOINT',
-            'LOOP',
-            'LOOP_BEGIN',
-            'LOOPPOINT',
-            'LOOPS',
-            'LOOPSTART',
-            'LOOP_START',
-            'LOOP-START',
-            'UM3.STREAM.LOOPPOINT.START',
-            'XIPH_CUE_LOOPSTART',
+            "COMMENT=LOOPPOINT",
+            "LOOP",
+            "LOOP_BEGIN",
+            "LOOPPOINT",
+            "LOOPS",
+            "LOOPSTART",
+            "LOOP_START",
+            "LOOP-START",
+            "UM3.STREAM.LOOPPOINT.START",
+            "XIPH_CUE_LOOPSTART",
         ]
 
         for tag in known_tags:
             if tag in file_tags:
                 return tag
 
-        raise ValueError(f"No loop start tag could be automatically detected in the metadata of \"{self.filename}\".")
-
+        raise ValueError(
+            f'No loop start tag could be automatically detected in the metadata of "{self.filename}".'
+        )
 
     def _find_end_tag(
         self,
         file_tags: dict[str, List[str]],
     ) -> str:
         known_tags = [
-            'LOOPE',
-            'LOOPEND',
-            'LOOP_END',
-            'LOOP-END',
-            'LOOPLENGTH',
-            'LOOP_LENGTH',
-            'LOOP-LENGTH',
-            'XIPH_CUE_LOOPEND',
+            "LOOPE",
+            "LOOPEND",
+            "LOOP_END",
+            "LOOP-END",
+            "LOOPLENGTH",
+            "LOOP_LENGTH",
+            "LOOP-LENGTH",
+            "XIPH_CUE_LOOPEND",
         ]
 
         for tag in known_tags:
             if tag in file_tags:
                 return tag
 
-        raise ValueError(f"No loop end tag could be automatically detected in the metadata of \"{self.filename}\".")
-
+        raise ValueError(
+            f'No loop end tag could be automatically detected in the metadata of "{self.filename}".'
+        )
 
     def _end_tag_is_offset(
         self,
@@ -352,7 +338,6 @@ class MusicLooper:
 
         return "LEN" in upper_loop_end_tag or "OFFSET" in upper_loop_end_tag
 
-
     def export_tags(
         self,
         loop_start: int,
@@ -360,7 +345,7 @@ class MusicLooper:
         loop_start_tag: str,
         loop_end_tag: str,
         is_offset: Optional[bool] = None,
-        output_dir: Optional[str] = None
+        output_dir: Optional[str] = None,
     ) -> Tuple[str]:
         """Adds metadata tags of loop points to a copy of the source audio file.
 
@@ -375,7 +360,7 @@ class MusicLooper:
         # Workaround for taglib import issues on Apple silicon devices
         # Import taglib only when needed to isolate ImportErrors
         import taglib
-            
+
         if output_dir is None:
             output_dir = os.path.abspath(self.mlaudio.filepath)
 
@@ -396,8 +381,9 @@ class MusicLooper:
 
         return str(loop_start), str(loop_end)
 
-
-    def read_tags(self, loop_start_tag: str, loop_end_tag: str, is_offset: Optional[bool] = None) -> Tuple[int, int]:
+    def read_tags(
+        self, loop_start_tag: str, loop_end_tag: str, is_offset: Optional[bool] = None
+    ) -> Tuple[int, int]:
         """Reads the tags provided from the file and returns the read loop points
 
         Args:
@@ -421,9 +407,13 @@ class MusicLooper:
             if loop_end_tag is None:
                 loop_end_tag = self._find_end_tag(audio_file.tags)
             if loop_start_tag not in audio_file.tags:
-                raise ValueError(f"The tag \"{loop_start_tag}\" is not present in the metadata of \"{self.filename}\".")
+                raise ValueError(
+                    f'The tag "{loop_start_tag}" is not present in the metadata of "{self.filename}".'
+                )
             if loop_end_tag not in audio_file.tags:
-                raise ValueError(f"The tag \"{loop_end_tag}\" is not present in the metadata of \"{self.filename}\".")
+                raise ValueError(
+                    f'The tag "{loop_end_tag}" is not present in the metadata of "{self.filename}".'
+                )
             try:
                 loop_start = int(audio_file.tags[loop_start_tag][0])
                 loop_end = int(audio_file.tags[loop_end_tag][0])

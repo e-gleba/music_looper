@@ -1,75 +1,89 @@
 import os
+from functools import lru_cache
 
-import lazy_loader as lazy
 
-yt_dlp = lazy.load("yt_dlp")
+@lru_cache(maxsize=1)
+def _yt_dlp():
+    """Lazy-load yt_dlp module."""
+    import yt_dlp
+
+    return yt_dlp
 
 
 class YtdLogger:
-    def __init__(self) -> None:
-        self.verbose = "PML_VERBOSE" in os.environ
+    """Minimal logger for yt-dlp with optional verbose mode."""
 
-    def debug(self, msg):
-        # For compatibility with youtube-dl, both debug and info are passed into debug
-        # You can distinguish them by the prefix '[debug] '
+    __slots__ = ("verbose",)
+
+    def __init__(self) -> None:
+        self.verbose = os.getenv("PML_VERBOSE") is not None
+
+    def debug(self, msg: str) -> None:
         if not msg.startswith("[debug] "):
             self.info(msg)
 
-    def info(self, msg):
-        # Suppress misleading option (only applicable to yt-dlp)
-        if "(pass -k to keep)" in msg:
-            pass
-        elif msg.startswith("[download]"):
-            print(msg, end="\r")
-        elif msg.startswith("[ExtractAudio]"):
-            print(msg)
-        elif self.verbose:
-            print(msg)
+    def info(self, msg: str) -> None:
+        match msg:
+            case s if "(pass -k to keep)" in s:
+                pass
+            case s if s.startswith("[download]"):
+                print(s, end="\r")
+            case s if s.startswith("[ExtractAudio]"):
+                print(s)
+            case _ if self.verbose:
+                print(msg)
 
-    def warning(self, msg):
+    def warning(self, msg: str) -> None:
         if self.verbose:
             print(msg)
 
-    def error(self, msg):
+    def error(self, msg: str) -> None:
         print(msg)
 
 
 class YoutubeDownloader:
-    def __init__(self, url, output_path):
-        ydl_opts = {
+    """Downloads and extracts audio from YouTube URLs using yt-dlp."""
+
+    __slots__ = ("filepath", "error_code")
+
+    # SponsorBlock segments to skip (non-music content)
+    SKIP_SEGMENTS = (
+        "sponsor",
+        "selfpromo",
+        "interaction",
+        "intro",
+        "outro",
+        "preview",
+        "music_offtopic",
+        "filler",
+    )
+
+    def __init__(self, url: str, output_path: str) -> None:
+        self.filepath: str | None = None
+
+        opts = {
             "logger": YtdLogger(),
             "format": "bestaudio/best",
+            "paths": {"home": output_path, "temp": output_path},
+            "progress_hooks": [self._on_progress],
+            "postprocessor_hooks": [self._on_postprocess],
             "postprocessors": [
                 {"key": "SponsorBlock", "when": "pre_process"},
-                {  # Skips all unrelated/non-music sections for youtube
+                {
                     "key": "ModifyChapters",
-                    "remove_sponsor_segments": [
-                        "sponsor",
-                        "selfpromo",
-                        "interaction",
-                        "intro",
-                        "outro",
-                        "preview",
-                        "music_offtopic",
-                        "filler",
-                    ],
+                    "remove_sponsor_segments": list(self.SKIP_SEGMENTS),
                 },
-                {  # Extracts audio using ffmpeg
-                    "key": "FFmpegExtractAudio",
-                },
+                {"key": "FFmpegExtractAudio"},
             ],
-            "paths": {"home": output_path, "temp": output_path},
-            "progress_hooks": [self.progress_hook],
-            "postprocessor_hooks": [self.postprocessor_hook],
         }
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        with _yt_dlp().YoutubeDL(opts) as ydl:
             self.error_code = ydl.download([url])
 
-    def progress_hook(self, d):
+    def _on_progress(self, d: dict) -> None:
         if d["status"] == "finished":
             print("\nDone downloading, now post-processing...")
 
-    def postprocessor_hook(self, d):
+    def _on_postprocess(self, d: dict) -> None:
         if d["status"] == "finished":
             self.filepath = d["info_dict"].get("filepath")

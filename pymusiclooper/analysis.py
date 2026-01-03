@@ -41,145 +41,89 @@ def find_best_loop_points(
     brute_force: bool = False,
     disable_pruning: bool = False,
 ) -> List[LoopPair]:
-    """Finds the best loop points for a given audio track, given the constraints specified
-
-    Args:
-        mlaudio (MLAudio): The MLAudio object to use for analysis
-        min_duration_multiplier (float, optional): The minimum duration of a loop as a multiplier of track duration. Defaults to 0.35.
-        min_loop_duration (float, optional): The minimum duration of a loop (in seconds). Defaults to None.
-        max_loop_duration (float, optional): The maximum duration of a loop (in seconds). Defaults to None.
-        approx_loop_start (float, optional): The approximate location of the desired loop start (in seconds). If specified, must specify approx_loop_end as well. Defaults to None.
-        approx_loop_end (float, optional): The approximate location of the desired loop end (in seconds). If specified, must specify approx_loop_start as well. Defaults to None.
-        brute_force (bool, optional): Checks the entire track instead of the detected beats (disclaimer: runtime may be significantly longer). Defaults to False.
-        disable_pruning (bool, optional): Returns all the candidate loop points without filtering. Defaults to False.
-    Raises:
-        LoopNotFoundError: raised in case no loops were found
-
-    Returns:
-        List[LoopPair]: A list of `LoopPair` objects containing the loop points related data. See the `LoopPair` class for more info.
-    """
+    """Finds the best loop points for a given audio track."""
     runtime_start = time.perf_counter()
-    min_loop_duration = (
-        mlaudio.seconds_to_frames(min_loop_duration)
-        if min_loop_duration is not None
-        else mlaudio.seconds_to_frames(
-            int(min_duration_multiplier * mlaudio.total_duration)
-        )
+    s2f = mlaudio.seconds_to_frames  # Local alias for repeated calls
+
+    # Duration bounds (in frames)
+    total_frames = s2f(mlaudio.total_duration)
+    min_dur = (
+        s2f(min_loop_duration)
+        if min_loop_duration
+        else s2f(int(min_duration_multiplier * mlaudio.total_duration))
     )
-    max_loop_duration = (
-        mlaudio.seconds_to_frames(max_loop_duration)
-        if max_loop_duration is not None
-        else mlaudio.seconds_to_frames(mlaudio.total_duration)
-    )
+    max_dur = s2f(max_loop_duration) if max_loop_duration else total_frames
+    min_dur = max(1, min_dur)
 
-    # Loop points must be at least 1 frame apart
-    min_loop_duration = max(1, min_loop_duration)
+    approx_mode = approx_loop_start is not None and approx_loop_end is not None
 
-    if approx_loop_start is not None and approx_loop_end is not None:
-        # Skipping the unnecessary beat analysis (in this case) speeds up the analysis runtime by ~2x
-        # and significantly reduces the total memory consumption
-        chroma, power_db, _, _ = _analyze_audio(mlaudio, skip_beat_analysis=True)
-        # Set bpm to a general average of 120
-        bpm = 120.0
-
-        approx_loop_start = mlaudio.seconds_to_frames(
-            approx_loop_start, apply_trim_offset=True
-        )
-        approx_loop_end = mlaudio.seconds_to_frames(
-            approx_loop_end, apply_trim_offset=True
-        )
-
-        n_frames_to_check = mlaudio.seconds_to_frames(2)
-
-        # Adjust min and max loop duration checks to the specified range
-        min_loop_duration = (
-            (approx_loop_end - n_frames_to_check)
-            - (approx_loop_start + n_frames_to_check)
-            - 1
-        )
-        max_loop_duration = (
-            (approx_loop_end + n_frames_to_check)
-            - (approx_loop_start - n_frames_to_check)
-            + 1
-        )
-
-        # Override the beats to check with the specified approx points +/- 2 seconds
-        beats = np.concatenate(
-            [
-                np.arange(
-                    start=max(0, approx_loop_start - n_frames_to_check),
-                    stop=min(
-                        mlaudio.seconds_to_frames(mlaudio.total_duration),
-                        approx_loop_start + n_frames_to_check,
-                    ),
-                ),
-                np.arange(
-                    start=max(0, approx_loop_end - n_frames_to_check),
-                    stop=min(
-                        mlaudio.seconds_to_frames(mlaudio.total_duration),
-                        approx_loop_end + n_frames_to_check,
-                    ),
-                ),
-            ]
-        )
-    elif brute_force:
-        # Similarly skip beat analysis, as the results will not be used
+    if approx_mode or brute_force:
         chroma, power_db, _, _ = _analyze_audio(mlaudio, skip_beat_analysis=True)
         bpm = 120.0
-        beats = np.arange(start=0, stop=chroma.shape[-1], step=1, dtype=int)
-        logging.info(f"Overriding number of frames to check with: {beats.size}")
-        logging.info(f"Estimated iterations required using brute force: {int(beats.size*beats.size*(1-(min_loop_duration/chroma.shape[-1])))}")
-        logging.info("**NOTICE** The program may appear frozen, but processing will continue in the background. This operation may take several minutes to complete.")
-    else: # normal mode of operation
+
+        if approx_mode:
+            start_frame = s2f(approx_loop_start, apply_trim_offset=True)
+            end_frame = s2f(approx_loop_end, apply_trim_offset=True)
+            window = s2f(2)  # +/- 2 seconds
+
+            min_dur = (end_frame - window) - (start_frame + window) - 1
+            max_dur = (end_frame + window) - (start_frame - window) + 1
+
+            beats = np.concatenate(
+                [
+                    np.arange(
+                        max(0, start_frame - window),
+                        min(total_frames, start_frame + window),
+                    ),
+                    np.arange(
+                        max(0, end_frame - window),
+                        min(total_frames, end_frame + window),
+                    ),
+                ]
+            )
+        else:  # brute_force
+            beats = np.arange(chroma.shape[-1], dtype=int)
+            n_iter = int(beats.size**2 * (1 - min_dur / chroma.shape[-1]))
+            logging.info(f"Brute force: {beats.size} frames, ~{n_iter} iterations")
+            logging.info("**NOTICE** Processing may take several minutes.")
+    else:
         chroma, power_db, bpm, beats = _analyze_audio(mlaudio)
         logging.info(f"Detected {beats.size} beats at {bpm:.0f} bpm")
 
-    logging.info(
-        "Finished initial audio processing in {:.3f}s".format(
-            time.perf_counter() - runtime_start
-        )
-    )
+    logging.info(f"Initial processing: {time.perf_counter() - runtime_start:.3f}s")
 
-    initial_pairs_start_time = time.perf_counter()
-
-    # Since numba jitclass cannot be cached, the pair data must be stored temporarily in a list of tuple
-    # (instead of a list of LoopPairs directly) and then loaded into a list of LoopPair objects using list comprehension
-    unproc_candidate_pairs = _find_candidate_pairs(
-        chroma, power_db, beats, min_loop_duration, max_loop_duration
-    )
+    # Find candidate pairs
+    t0 = time.perf_counter()
     candidate_pairs = [
         LoopPair(
-            _loop_start_frame_idx=tup[0],
-            _loop_end_frame_idx=tup[1],
-            note_distance=tup[2],
-            loudness_difference=tup[3],
+            _loop_start_frame_idx=start,
+            _loop_end_frame_idx=end,
+            note_distance=note_dist,
+            loudness_difference=loud_diff,
         )
-        for tup in unproc_candidate_pairs
+        for start, end, note_dist, loud_diff in _find_candidate_pairs(
+            chroma, power_db, beats, min_dur, max_dur
+        )
     ]
 
-    n_candidate_pairs = len(candidate_pairs) if candidate_pairs is not None else 0
     logging.info(
-        f"Found {n_candidate_pairs} possible loop points in"
-        f" {(time.perf_counter() - initial_pairs_start_time):.3f}s"
+        f"Found {len(candidate_pairs)} candidates in {time.perf_counter() - t0:.3f}s"
     )
 
     if not candidate_pairs:
         raise LoopNotFoundError(
-            f"No loop points found for \"{mlaudio.filename}\" with current parameters."
+            f'No loop points found for "{mlaudio.filename}" with current parameters.'
         )
 
-    filtered_candidate_pairs = _assess_and_filter_loop_pairs(
+    filtered = _assess_and_filter_loop_pairs(
         mlaudio, chroma, bpm, candidate_pairs, disable_pruning
     )
 
-    # prefer longer loops for highly similar sequences
-    if len(filtered_candidate_pairs) > 1:
-        _prioritize_duration(filtered_candidate_pairs)
+    if len(filtered) > 1:
+        _prioritize_duration(filtered)
 
-    # Set the exact loop start and end in samples and adjust them
-    # to the nearest zero crossing. Avoids audio popping/clicking while looping
-    # as much as possible.
-    for pair in filtered_candidate_pairs:
+    # Adjust to nearest zero crossings
+    for pair in filtered:
         if mlaudio.trim_offset > 0:
             pair._loop_start_frame_idx = int(
                 mlaudio.apply_trim_offset(pair._loop_start_frame_idx)
@@ -187,87 +131,77 @@ def find_best_loop_points(
             pair._loop_end_frame_idx = int(
                 mlaudio.apply_trim_offset(pair._loop_end_frame_idx)
             )
+
         pair.loop_start = nearest_zero_crossing(
             mlaudio.playback_audio,
             mlaudio.rate,
-            mlaudio.frames_to_samples(pair._loop_start_frame_idx)
+            mlaudio.frames_to_samples(pair._loop_start_frame_idx),
         )
         pair.loop_end = nearest_zero_crossing(
             mlaudio.playback_audio,
             mlaudio.rate,
-            mlaudio.frames_to_samples(pair._loop_end_frame_idx)
+            mlaudio.frames_to_samples(pair._loop_end_frame_idx),
         )
 
-    if not filtered_candidate_pairs:
+    if not filtered:
         raise LoopNotFoundError(
-            f"No loop points found for {mlaudio.filename} with current parameters."
+            f'No loop points found for "{mlaudio.filename}" with current parameters.'
         )
 
-    logging.info(
-        f"Filtered to {len(filtered_candidate_pairs)} best candidate loop points"
-    )
-    logging.info(
-        f"Total analysis runtime: {time.perf_counter() - runtime_start:.3f}s"
-    )
+    logging.info(f"Filtered to {len(filtered)} best candidates")
+    logging.info(f"Total runtime: {time.perf_counter() - runtime_start:.3f}s")
 
-    return filtered_candidate_pairs
+    return filtered
 
 
 def _analyze_audio(
-    mlaudio: MLAudio, skip_beat_analysis=False
+    mlaudio: MLAudio, skip_beat_analysis: bool = False
 ) -> Tuple[np.ndarray, np.ndarray, float, np.ndarray]:
-    """Performs the main audio analysis required
+    """Performs the main audio analysis required."""
+    S = librosa.stft(y=mlaudio.audio)
+    S_power = S.real**2 + S.imag**2  # Faster than np.abs(S)**2
 
-    Args:
-        mlaudio (MLAudio): the MLAudio object to perform analysis on
-        skip_beat_analysis (bool, optional): Skips beat analysis if true and returns None for bpm and beats. Defaults to False.
+    freqs = librosa.fft_frequencies(sr=mlaudio.rate)
+    S_weighted = librosa.perceptual_weighting(S=S_power, frequencies=freqs)
 
-    Returns:
-        Tuple[np.ndarray, np.ndarray, float, np.ndarray]: a tuple containing the (chroma spectrogram, power spectrogram in dB, tempo/bpm, frame indices of detected beats)
-    """
-    S = librosa.core.stft(y=mlaudio.audio)
-    S_power = np.abs(S) ** 2
-    S_weighed = librosa.core.perceptual_weighting(
-        S=S_power, frequencies=librosa.fft_frequencies(sr=mlaudio.rate)
-    )
-    mel_spectrogram = librosa.feature.melspectrogram(
-        S=S_weighed, sr=mlaudio.rate, n_mels=128, fmax=8000
+    mel_spec = librosa.feature.melspectrogram(
+        S=S_weighted, sr=mlaudio.rate, n_mels=128, fmax=8000
     )
     chroma = librosa.feature.chroma_stft(S=S_power)
-    power_db = librosa.power_to_db(S_weighed, ref=np.median)
+    power_db = librosa.power_to_db(S_weighted, ref=np.median)
 
     if skip_beat_analysis:
         return chroma, power_db, None, None
 
     try:
-        onset_env = librosa.onset.onset_strength(S=mel_spectrogram)
+        onset_env = librosa.onset.onset_strength(S=mel_spec)
 
         pulse = librosa.beat.plp(onset_envelope=onset_env)
         beats_plp = np.flatnonzero(librosa.util.localmax(pulse))
         bpm, beats = librosa.beat.beat_track(onset_envelope=onset_env)
 
-        beats = np.union1d(beats, beats_plp)
-        beats = np.sort(beats)
+        beats = np.union1d(beats, beats_plp)  # Already returns sorted unique
+        bpm = bpm.item() if isinstance(bpm, np.ndarray) else bpm
 
-        if isinstance(bpm, np.ndarray):
-            bpm = bpm[0]
     except Exception as e:
-        raise LoopNotFoundError(f"Beat analysis failed for \"{mlaudio.filename}\". Cannot continue.") from e
+        raise LoopNotFoundError(
+            f'Beat analysis failed for "{mlaudio.filename}". Cannot continue.'
+        ) from e
 
     return chroma, power_db, bpm, beats
 
 
-@njit
+@njit(fastmath=True, cache=True)
 def _db_diff(power_db_f1: np.ndarray, power_db_f2: np.ndarray) -> float:
-    return np.abs(np.max(power_db_f1) - np.max(power_db_f2))
+    return abs(power_db_f1.max() - power_db_f2.max())
 
 
-@njit
-def _norm(a: np.ndarray) -> float:
+@njit(fastmath=True, cache=True)
+def _norm(a: np.ndarray) -> np.ndarray:
     return np.sqrt(np.sum(np.abs(a) ** 2, axis=0))
 
 
-@njit(cache=True)
+@njit(cache=True, fastmath=True)
 def _find_candidate_pairs(
     chroma: np.ndarray,
     power_db: np.ndarray,
@@ -275,54 +209,70 @@ def _find_candidate_pairs(
     min_loop_duration: int,
     max_loop_duration: int,
 ) -> List[Tuple[int, int, float, float]]:
-    """Generates a list of all valid candidate loop pairs using combinations of beat indices,
-    by comparing the notes using the chroma spectrogram and their loudness difference
+    """Generates a list of all valid candidate loop pairs."""
 
-    Args:
-        chroma (np.ndarray): The chroma spectrogram
-        power_db (np.ndarray): The power spectrogram in dB
-        beats (np.ndarray): The frame indices of detected beats
-        min_loop_duration (int): Minimum loop duration (in frames)
-        max_loop_duration (int): Maximum loop duration (in frames)
+    NOTE_THRESH = 0.0875
+    LOUDNESS_THRESH = 0.5
 
-    Returns:
-        List[Tuple[int, int, float, float]]: A list of tuples containing each candidate loop pair data in the following format (loop_start, loop_end, note_distance, loudness_difference)
-    """
+    # Precompute at beat indices (contiguous memory)
+    chroma_beats = np.ascontiguousarray(chroma[:, beats])
+    power_beats = power_db[:, beats]
+    n_beats = len(beats)
+    n_chroma = chroma_beats.shape[0]
+
+    # Precompute all thresholds and power maxes upfront
+    deviation = np.empty(n_beats)
+    power_max = np.empty(n_beats)
+
+    for i in range(n_beats):
+        acc = 0.0
+        pmax = -np.inf
+        for j in range(n_chroma):
+            val = chroma_beats[j, i] * NOTE_THRESH
+            acc += val * val
+            if power_beats[j, i] > pmax:
+                pmax = power_beats[j, i]
+        deviation[i] = np.sqrt(acc)
+        power_max[i] = pmax
+
     candidate_pairs = []
 
-    # Magic constants
-    ## Mainly found through trial and error,
-    ## higher values typically result in the inclusion of musically unrelated beats/notes
-    ACCEPTABLE_NOTE_DEVIATION = 0.0875
-    ## Since the _db_diff comparison is takes a perceptually weighted power_db frame,
-    ## the difference should be imperceptible (ideally, close to 0)
-    ## Based on trial and error, values higher than ~0.5 have a perceptible
-    ## difference in loudness
-    ACCEPTABLE_LOUDNESS_DIFFERENCE = 0.5
+    for end_idx in range(n_beats):
+        loop_end = beats[end_idx]
+        threshold = deviation[end_idx]
+        pmax_end = power_max[end_idx]
 
-    deviation = _norm(chroma[..., beats] * ACCEPTABLE_NOTE_DEVIATION)
+        # Valid start range: loop_end - max_dur <= start <= loop_end - min_dur
+        min_valid_start = loop_end - max_loop_duration
+        max_valid_start = loop_end - min_loop_duration
 
-    for idx, loop_end in enumerate(beats):
-        for loop_start in beats:
-            loop_length = loop_end - loop_start
-            if loop_length < min_loop_duration:
-                break
-            if loop_length > max_loop_duration:
-                continue
-            note_distance = _norm(chroma[..., loop_end] - chroma[..., loop_start])
+        for start_idx in range(n_beats):
+            loop_start = beats[start_idx]
 
-            if note_distance <= deviation[idx]:
-                loudness_difference = _db_diff(
-                    power_db[..., loop_end], power_db[..., loop_start]
-                )
-                loop_pair = (
-                    int(loop_start),
-                    int(loop_end),
-                    note_distance,
-                    loudness_difference,
-                )
-                if loudness_difference <= ACCEPTABLE_LOUDNESS_DIFFERENCE:
-                    candidate_pairs.append(loop_pair)
+            if loop_start > max_valid_start:
+                break  # Sorted: all subsequent are too close
+            if loop_start < min_valid_start:
+                continue  # Too far apart
+
+            # Inline norm: manual loop is faster in Numba than np.dot for small arrays
+            dist_sq = 0.0
+            for j in range(n_chroma):
+                d = chroma_beats[j, end_idx] - chroma_beats[j, start_idx]
+                dist_sq += d * d
+            note_distance = np.sqrt(dist_sq)
+
+            if note_distance <= threshold:
+                loudness_diff = abs(pmax_end - power_max[start_idx])
+
+                if loudness_diff <= LOUDNESS_THRESH:
+                    candidate_pairs.append(
+                        (
+                            loop_start,
+                            loop_end,
+                            note_distance,
+                            loudness_diff,
+                        )
+                    )
 
     return candidate_pairs
 
@@ -334,117 +284,98 @@ def _assess_and_filter_loop_pairs(
     candidate_pairs: List[LoopPair],
     disable_pruning: bool = False,
 ) -> List[LoopPair]:
-    """Assigns the scores to each loop pair and prunes the list of candidate loop pairs
+    """Assigns scores to each loop pair and prunes the candidate list."""
 
-    Args:
-        mlaudio (MLAudio): MLAudio object of the track being analyzed
-        chroma (np.ndarray): The chroma spectrogram
-        bpm (float): The estimated bpm/tempo of the track
-        candidate_pairs (List[LoopPair]): The list of candidate loop pairs found
-        disable_pruning (bool, optional): Returns all the candidate loop points without filtering. Defaults to False.
-
-    Returns:
-        List[LoopPair]: A scored and filtered list of valid loop candidate pairs
-    """
-    beats_per_second = bpm / 60
-    num_test_beats = 12
-    seconds_to_test = num_test_beats / beats_per_second
+    # Calculate test duration in frames (~12 beats)
+    seconds_to_test = 12 / (bpm / 60)
     test_offset = mlaudio.samples_to_frames(int(seconds_to_test * mlaudio.rate))
+    test_offset = min(test_offset, chroma.shape[-1] // 4)  # Cap at 25% for short tracks
 
-    # adjust offset for very short tracks to 25% of its length
-    if test_offset > chroma.shape[-1]:
-        test_offset = chroma.shape[-1] // 4
+    # Prune if needed
+    pairs = (
+        _prune_candidates(candidate_pairs)
+        if len(candidate_pairs) >= 100 and not disable_pruning
+        else candidate_pairs
+    )
 
-    # Prune candidates if there are too many
-    if len(candidate_pairs) >= 100 and not disable_pruning:
-        pruned_candidate_pairs = _prune_candidates(candidate_pairs)
-    else:
-        pruned_candidate_pairs = candidate_pairs
+    weights = _weights(test_offset, start=max(2, test_offset // 12), stop=1)
 
-    weights = _weights(test_offset, start=max(2, test_offset // num_test_beats), stop=1)
-
-    pair_score_list = [
-        _calculate_loop_score(
-            int(pair._loop_start_frame_idx),
-            int(pair._loop_end_frame_idx),
+    # Score and assign in single pass
+    for pair in pairs:
+        pair.score = _calculate_loop_score(
+            pair._loop_start_frame_idx,
+            pair._loop_end_frame_idx,
             chroma,
             test_duration=test_offset,
             weights=weights,
         )
-        for pair in pruned_candidate_pairs
-    ]
-    # Add cosine similarity as score
-    for pair, score in zip(pruned_candidate_pairs, pair_score_list):
-        pair.score = score
 
-    # re-sort based on new score
-    pruned_candidate_pairs = sorted(
-        pruned_candidate_pairs, reverse=True, key=lambda x: x.score
-    )
-    return pruned_candidate_pairs
+    return sorted(pairs, key=lambda p: p.score, reverse=True)
 
 
 def _prune_candidates(
     candidate_pairs: List[LoopPair],
     keep_top_notes: float = 75,
     keep_top_loudness: float = 50,
-    acceptable_loudness=0.25,
+    acceptable_loudness: float = 0.25,
 ) -> List[LoopPair]:
-    db_diff_array = np.array([pair.loudness_difference for pair in candidate_pairs])
-    note_dist_array = np.array([pair.note_distance for pair in candidate_pairs])
+    """Prunes candidate pairs based on loudness and note distance thresholds."""
 
-    # Minimum value used to avoid issues with tracks with lots of silence
     epsilon = 1e-3
-    min_adjusted_db_diff_array = db_diff_array[db_diff_array > epsilon]
-    min_adjusted_note_dist_array = note_dist_array[note_dist_array > epsilon]
 
-    # Avoid index errors by having at least 3 elements when performing percentile-based pruning
-    # Otherwise, skip by setting the value to the highest available
-    if min_adjusted_db_diff_array.size > 3:
-        db_threshold = np.percentile(
-            min_adjusted_db_diff_array, keep_top_loudness
-        )
-    else:
-        db_threshold = np.max(db_diff_array)
+    db_diff = np.array([p.loudness_difference for p in candidate_pairs])
+    note_dist = np.array([p.note_distance for p in candidate_pairs])
 
-    if min_adjusted_note_dist_array.size > 3:
-        note_dist_threshold = np.percentile(
-            min_adjusted_note_dist_array, keep_top_notes
-        )
-    else:
-        note_dist_threshold = np.max(note_dist_array)
+    # Filter out near-silent samples for percentile calculation
+    db_valid = db_diff[db_diff > epsilon]
+    note_valid = note_dist[note_dist > epsilon]
+
+    # Use percentile if enough samples, else fall back to max
+    db_thresh = (
+        np.percentile(db_valid, keep_top_loudness)
+        if db_valid.size > 3
+        else db_diff.max()
+    )
+    note_thresh = (
+        np.percentile(note_valid, keep_top_notes)
+        if note_valid.size > 3
+        else note_dist.max()
+    )
 
     # Lower values are better
-    indices_that_meet_cond = np.flatnonzero(
-        (db_diff_array <= max(acceptable_loudness, db_threshold)) & (note_dist_array <= note_dist_threshold)
-    )
-    return [candidate_pairs[idx] for idx in indices_that_meet_cond]
+    mask = (db_diff <= max(acceptable_loudness, db_thresh)) & (note_dist <= note_thresh)
+
+    from itertools import compress
+
+    return list(compress(candidate_pairs, mask))
 
 
-def _prioritize_duration(pair_list: List[LoopPair]) -> List[LoopPair]:
-    db_diff_array = np.array([pair.loudness_difference for pair in pair_list])
-    db_threshold = np.median(db_diff_array)
+def _prioritize_duration(pair_list: List[LoopPair]) -> None:
+    """Promotes the longest high-scoring loop to the front of the list (in-place)."""
 
-    duration_argmax = 0
-    duration_max = 0
+    if len(pair_list) < 2:
+        return
 
-    score_array = np.array([pair.score for pair in pair_list])
-    score_threshold = np.percentile(score_array, 90)
+    db_diff = np.array([p.loudness_difference for p in pair_list])
+    scores = np.array([p.score for p in pair_list])
 
-    # Must be a negligible difference from the top score
-    score_threshold = max(score_threshold, pair_list[0].score - 1e-4)
+    db_thresh = np.median(db_diff)
+    score_thresh = max(np.percentile(scores, 90), pair_list[0].score - 1e-4)
 
-    # Since pair_list is already sorted
-    # Break the loop if the condition is not met
+    # Find longest duration among top-scoring, low-loudness pairs
+    best_idx, best_dur = 0, 0
+
     for idx, pair in enumerate(pair_list):
-        if pair.score < score_threshold:
-            break
-        duration = pair.loop_end - pair.loop_start
-        if duration > duration_max and pair.loudness_difference <= db_threshold:
-            duration_max, duration_argmax = duration, idx
+        if pair.score < score_thresh:
+            break  # List is sorted by score; no need to continue
 
-    if duration_argmax:
-        pair_list.insert(0, pair_list.pop(duration_argmax))
+        duration = pair.loop_end - pair.loop_start
+        if duration > best_dur and pair.loudness_difference <= db_thresh:
+            best_idx, best_dur = idx, duration
+
+    # Move best to front if not already there
+    if best_idx:
+        pair_list.insert(0, pair_list.pop(best_idx))
 
 
 def _calculate_loop_score(
@@ -454,27 +385,14 @@ def _calculate_loop_score(
     test_duration: int,
     weights: Optional[np.ndarray] = None,
 ) -> float:
-    """Calculates the similarity of two sequences given the starting indices `b1` and `b2` for the period of the `test_duration` specified.
-        Returns the best score based on the cosine similarity of subsequent (or preceding) notes.
+    """Returns the best cosine similarity score (lookahead vs lookbehind) for two loop points."""
 
-    Args:
-        b1 (int): Frame index of the first beat to compare
-        b2 (int): Frame index of the second beat to compare
-        chroma (np.ndarray): The chroma spectrogram of the audio
-        test_duration (int): How many frames along the chroma spectrogram to test.
-        weights (np.ndarray, optional): If specified, will provide a weighted average of the note scores according to the weight array provided. Defaults to None.
+    rev_weights = weights[::-1] if weights is not None else None
 
-    Returns:
-        float: the weighted average of the cosine similarity of the notes along the tested region
-    """
-    lookahead_score = _calculate_subseq_beat_similarity(
-        b1, b2, chroma, test_duration, weights=weights
+    return max(
+        _calculate_subseq_beat_similarity(b1, b2, chroma, test_duration, weights),
+        _calculate_subseq_beat_similarity(b1, b2, chroma, -test_duration, rev_weights),
     )
-    lookbehind_score = _calculate_subseq_beat_similarity(
-        b1, b2, chroma, -test_duration, weights=weights[::-1]
-    )
-
-    return max(lookahead_score, lookbehind_score)
 
 
 def _calculate_subseq_beat_similarity(
@@ -484,119 +402,83 @@ def _calculate_subseq_beat_similarity(
     test_end_offset: int,
     weights: Optional[np.ndarray] = None,
 ) -> float:
-    """Calculates the similarity of subsequent notes of the two specified indices (b1_start, b2_start) using cosine similarity
+    """Calculates cosine similarity of subsequent/preceding frames at two positions."""
 
-    Args:
-        b1_start (int): Starting frame index of the first beat to compare
-        b2_start (int): Starting frame index of the second beat to compare
-        chroma (np.ndarray): The chroma spectrogram of the audio
-        test_end_offset (int): The number of frames to offset from the starting index. If negative, will be testing the preceding frames instead of the subsequent frames.
-        weights (np.ndarray, optional): If specified, will provide a weighted average of the note scores according to the weight array provided. Defaults to None.
-
-    Returns:
-        float: the weighted average of the cosine similarity of the notes along the tested region
-    """
     chroma_len = chroma.shape[-1]
-    test_length = abs(test_end_offset)
+    test_len = abs(test_end_offset)
 
+    # Compute slice bounds
     if test_end_offset < 0:
-        b1_end = b1_start
-        b2_end = b2_start
-        max_negative_offset = max(test_end_offset, -b1_start, -b2_start)
-        b1_start += max_negative_offset
-        b2_start += max_negative_offset
-        max_offset = abs(max_negative_offset)
+        offset = min(test_len, b1_start, b2_start)
+        s1, s2 = slice(b1_start - offset, b1_start), slice(b2_start - offset, b2_start)
     else:
-        # clip to chroma len
-        b1_end = min(b1_start + test_length, chroma_len)
-        b2_end = min(b2_start + test_length, chroma_len)
-        # align testing lengths
-        max_offset = min(b1_end - b1_start, b2_end - b2_start)
-        b1_end, b2_end = (b1_start + max_offset, b2_start + max_offset)
+        offset = min(test_len, chroma_len - b1_start, chroma_len - b2_start)
+        s1, s2 = slice(b1_start, b1_start + offset), slice(b2_start, b2_start + offset)
 
-    dot_prod = np.einsum(
-        "ij,ij->j", chroma[..., b1_start:b1_end], chroma[..., b2_start:b2_end]
-    )
-    b1_norm = np.linalg.norm(chroma[..., b1_start:b1_end], axis=0)
-    b2_norm = np.linalg.norm(chroma[..., b2_start:b2_end], axis=0)
-    cosine_sim = dot_prod / (np.maximum(b1_norm * b2_norm, 1e-10))
+    b1_slice, b2_slice = chroma[:, s1], chroma[:, s2]
 
-    if max_offset < test_length:
-        return np.average(
-            np.pad(cosine_sim, pad_width=(0, test_length - max_offset), mode="constant", constant_values=0),
-            weights=weights,
-        )
-    else:
-        return np.average(cosine_sim, weights=weights)
+    # Cosine similarity per frame
+    dot = np.einsum("ij,ij->j", b1_slice, b2_slice)
+    norms = np.linalg.norm(b1_slice, axis=0) * np.linalg.norm(b2_slice, axis=0)
+    cosine_sim = dot / np.maximum(norms, 1e-10)
+
+    # Pad with zeros if shorter than expected (penalizes truncated tests)
+    if offset < test_len:
+        cosine_sim = np.pad(cosine_sim, (0, test_len - offset))
+
+    return np.average(cosine_sim, weights=weights)
 
 
 def _weights(length: int, start: int = 100, stop: int = 1):
     return np.geomspace(start, stop, num=length)
 
 
-@njit(cache=True)
+@njit(cache=True, fastmath=True)
 def nearest_zero_crossing(audio: np.ndarray, rate: int, sample_idx: int) -> int:
-    """Implementation of Audacity's `At Zero Crossings` feature. https://manual.audacityteam.org/man/select_menu_at_zero_crossings.html
-    Description is based on the relevant Audacity manual page, due to identical behaviour.
+    """Finds the nearest rising zero crossing with minimal local amplitude.
 
-    Returns the best closest sample point that is at a rising zero crossing point.
-    This is a point where a line joining the audio samples rises from left to right and crosses the zero horizontal line that represents silence.
-    The shift in audio position is not itself detectable to the ear, but the fact that the joins in the waveform are now of matching height helps avoid clicks in audio.
-
-    This feature does not necessarily find the nearest zero crossing to the current position. It aims to find the crossing where the average amplitude of samples in the vicinity is lowest.
-
-    Args:
-        audio (np.ndarray): Numpy array containing the playback audio; must be in the shape `(samples, n_channels)`
-        rate (int): Sample rate of the provided audio
-        sample_idx (int): The index of the sample point to return the nearest zero crossing of
-
-    Returns:
-        int: the index of the best sample point that is at a rising zero crossing point closest to the `sample_idx` provided, returns `sample_idx` if none where found
+    Simplified algorithm:
+    - Detects actual sign changes (zero crossings)
+    - Prefers rising crossings (negative→positive) for smoother splices
+    - Scores by: local amplitude + distance from target
     """
-    # Re-implementation of Audacity's NearestZeroCrossing function in Python
-    # https://github.com/audacity/audacity/blob/057bf4ee6f71962cd8ecc6dbccf0852695340758/src/menus/SelectMenus.cpp#L30
-    # Original credit goes to the Audacity team and contributors
-    n_channels = audio.shape[1]
+    n_samples, n_channels = audio.shape
+    window_size = max(2, rate // 100)  # ~10ms window
+    half_win = window_size // 2
 
-    # Window is 1/100th of a second
-    window_size = int(max(1, rate / 100))
+    start = max(0, sample_idx - half_win)
+    end = min(n_samples, sample_idx + half_win + 1)
 
-    # Create sample window centered around sample_idx
-    offset = window_size // 2
-    neg_offset = max(0, sample_idx - offset)
-    pos_offset = min(audio.shape[0], sample_idx + offset)
-    sample_window = audio[neg_offset:pos_offset]
-
-    # Adjusts the indexing offset in case the left side of sample_idx was clipped
-    offset_correction = abs(sample_idx - offset) if sample_idx - offset < 0 else 0
-
-    sample_window_length = sample_window.shape[0]
-    dist = np.zeros(sample_window_length)
-
-    for channel in range(n_channels):
-        prev = 2.0
-        one_dist = sample_window[..., channel].copy()
-        for i in range(sample_window_length):
-            fdist = np.abs(one_dist[i])
-            if prev * one_dist[i] > 0:  # both same sign? No good.
-                fdist += 0.4  # No good if same sign.
-            elif prev > 0.0:
-                fdist += 0.1  # medium penalty for downward crossing.
-            prev = one_dist[i]
-            one_dist[i] = fdist
-
-        for i in range(sample_window_length):
-            dist[i] += one_dist[i]
-            dist[i] += 0.1 * abs(i - offset + offset_correction) / (window_size / 2)
-
-    argmin = np.argmin(dist)
-    minimum_dist = dist[argmin]
-
-    # If we're worse than 0.2 on average, on one track, then no good.
-    if (n_channels == 1) and (minimum_dist > (0.2 * n_channels)):
-        return sample_idx
-    # If we're worse than 0.6 on average, on multi-track, then no good.
-    if (n_channels > 1) and (minimum_dist > (0.6 * n_channels)):
+    if end - start < 2:
         return sample_idx
 
-    return int(sample_idx + argmin - offset + offset_correction)
+    # Mix to mono for crossing detection
+    mono = audio[start:end, 0].copy()
+    for ch in range(1, n_channels):
+        mono += audio[start:end, ch]
+
+    center = sample_idx - start
+    best_idx, best_score = -1, np.inf
+
+    for i in range(1, len(mono)):
+        prev, curr = mono[i - 1], mono[i]
+
+        # Skip non-crossings (same sign)
+        if prev * curr > 0:
+            continue
+
+        # Score components (lower = better)
+        amplitude = (abs(prev) + abs(curr)) / n_channels  # Local amplitude
+        distance = 0.3 * abs(i - center) / half_win  # Distance penalty
+        falling = 0.15 if prev > 0 else 0.0  # Prefer rising crossings
+
+        score = amplitude + distance + falling
+
+        if score < best_score:
+            best_score, best_idx = score, i
+
+    # Reject if no crossing found or score too poor
+    if best_idx < 0 or best_score > 0.8 * n_channels:
+        return sample_idx
+
+    return start + best_idx
