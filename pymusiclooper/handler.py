@@ -11,7 +11,7 @@ from pymusiclooper.analysis import LoopPair
 from pymusiclooper.console import rich_console
 from pymusiclooper.core import MusicLooper
 from pymusiclooper.exceptions import AudioLoadError, LoopNotFoundError
-from pymusiclooper.utils import DEFAULT_OUTPUT_DIRECTORY_NAME
+from pymusiclooper.utils import DEFAULT_OUTPUT_DIR
 
 
 class LoopHandler:
@@ -38,7 +38,7 @@ class LoopHandler:
         self.filepath = path
         self._musiclooper = MusicLooper(filepath=path)
 
-        logging.info(f"Loaded \"{path}\". Analyzing...")
+        logging.info(f'Loaded "{path}". Analyzing...')
 
         self.loop_pair_list = self.musiclooper.find_loop_pairs(
             min_duration_multiplier=min_duration_multiplier,
@@ -63,7 +63,7 @@ class LoopHandler:
     def musiclooper(self) -> MusicLooper:
         """Returns the handler's `MusicLooper` instance."""
         return self._musiclooper
-    
+
     def format_time(self, samples: int, in_samples: bool = False):
         return samples if in_samples else self.musiclooper.samples_to_ftime(samples)
 
@@ -81,8 +81,12 @@ class LoopHandler:
     def interactive_handler(self, show_top=25):
         preview_looper = self.musiclooper
         total_candidates = len(self.loop_pair_list)
-        _display_more_hint_msg = "\nEnter 'more' to display additional loop points, 'all' to display all of them, or 'reset' to display the default amount." if show_top < total_candidates else ""
-        rich_console.print(f"Processing: \"{self.filepath}\"")
+        _display_more_hint_msg = (
+            "\nEnter 'more' to display additional loop points, 'all' to display all of them, or 'reset' to display the default amount."
+            if show_top < total_candidates
+            else ""
+        )
+        rich_console.print(f'Processing: "{self.filepath}"')
         _discovered_points_msg = f"Discovered loop points\n({min(show_top, total_candidates)}/{total_candidates} displayed)"
         table = Table(title=_discovered_points_msg, caption=_display_more_hint_msg)
         table.add_column("Index", justify="right", style="cyan", no_wrap=True)
@@ -127,7 +131,9 @@ class LoopHandler:
 
         def get_user_input():
             try:
-                num_input = rich_console.input("Enter the index number for the loop you'd like to use (append [cyan]p[/] to preview; e.g. [cyan]0p[/]):")
+                num_input = rich_console.input(
+                    "Enter the index number for the loop you'd like to use (append [cyan]p[/] to preview; e.g. [cyan]0p[/]):"
+                )
                 idx = 0
                 preview = False
 
@@ -148,19 +154,25 @@ class LoopHandler:
                     raise IndexError
 
                 if preview:
-                    rich_console.print(f"Previewing loop [cyan]#{idx}[/] | (Press [red]Ctrl+C[/] to stop looping):")
+                    rich_console.print(
+                        f"Previewing loop [cyan]#{idx}[/] | (Press [red]Ctrl+C[/] to stop looping):"
+                    )
                     loop_start = self.loop_pair_list[idx].loop_start
                     loop_end = self.loop_pair_list[idx].loop_end
                     # start preview 5 seconds before the looping point
                     offset = preview_looper.seconds_to_samples(5)
                     preview_offset = loop_end - offset if loop_end - offset > 0 else 0
-                    preview_looper.play_looping(loop_start, loop_end, start_from=preview_offset)
+                    preview_looper.play_looping(
+                        loop_start, loop_end, start_from=preview_offset
+                    )
                     return get_user_input()
                 else:
                     return idx
 
             except (ValueError, IndexError):
-                rich_console.print(f"Please enter a number within the range [0,{len(self.loop_pair_list)-1}].")
+                rich_console.print(
+                    f"Please enter a number within the range [0,{len(self.loop_pair_list)-1}]."
+                )
                 return get_user_input()
 
         try:
@@ -274,9 +286,9 @@ class LoopExportHandler(LoopHandler):
                 loop_start,
                 loop_end,
                 format=self.format,
-                output_dir=self.output_directory
+                output_dir=self.output_directory,
             )
-            message = f"Successfully exported \"{self.musiclooper.filename}\" intro/loop/outro sections to \"{self.output_directory}\""
+            message = f'Successfully exported "{self.musiclooper.filename}" intro/loop/outro sections to "{self.output_directory}"'
             if self.batch_mode:
                 logging.info(message)
             else:
@@ -296,7 +308,10 @@ class LoopExportHandler(LoopHandler):
                 console=rich_console,
                 transient=True,
             )
-            progress.add_task(f"Exporting an extended version of {self.musiclooper.filename}...", total=None)
+            progress.add_task(
+                f"Exporting an extended version of {self.musiclooper.filename}...",
+                total=None,
+            )
             progress.start()
         try:
             output_path = self.musiclooper.extend(
@@ -365,7 +380,7 @@ class LoopExportHandler(LoopHandler):
             with open(out_path, mode="w") as f:
                 f.writelines(formatted_lines)
 
-    def tag_runner(self, loop_start: int, loop_end: int):        
+    def tag_runner(self, loop_start: int, loop_end: int):
         loop_start_tag, loop_end_tag = self.tag_names
         loop_start, loop_end = self.musiclooper.export_tags(
             loop_start,
@@ -375,7 +390,7 @@ class LoopExportHandler(LoopHandler):
             is_offset=self.tag_offset,
             output_dir=self.output_directory,
         )
-        message = f"Exported {loop_start_tag}: {loop_start} and {loop_end_tag}: {loop_end} of \"{self.musiclooper.filename}\" to a copy in \"{self.output_directory}\""
+        message = f'Exported {loop_start_tag}: {loop_start} and {loop_end_tag}: {loop_end} of "{self.musiclooper.filename}" to a copy in "{self.output_directory}"'
         if self.batch_mode:
             logging.info(message)
         else:
@@ -404,7 +419,7 @@ class BatchHandler:
 
         Args:
             path (str): Path to directory.
-            output_dir (str): Output directory to use for exports. 
+            output_dir (str): Output directory to use for exports.
             recursive (bool, optional): Process directories recursively. Defaults to False.
             flatten (bool, optional): Flatten the output directory structure instead of preserving it when processing it recursively. Defaults to False.
             kwargs: Additional `kwargs` are passed onto `LoopExportHandler`.
@@ -422,7 +437,7 @@ class BatchHandler:
         )
 
         if len(files) == 0:
-            raise FileNotFoundError(f"No files found in \"{self.directory_path}\"")
+            raise FileNotFoundError(f'No files found in "{self.directory_path}"')
 
         output_dirs = (
             None
@@ -442,21 +457,25 @@ class BatchHandler:
                     pbar,
                     advance=1,
                     description=(
-                        f"Processing \"{os.path.relpath(file_path, self.directory_path)}\""
+                        f'Processing "{os.path.relpath(file_path, self.directory_path)}"'
                     ),
                 )
                 task_kwargs = {
                     **self.kwargs,
                     "_progressbar": progress,
                     "path": file_path,
-                    "output_dir": self.output_directory if self.flatten else output_dirs[file_idx]
+                    "output_dir": (
+                        self.output_directory if self.flatten else output_dirs[file_idx]
+                    ),
                 }
                 try:
                     self._batch_export_helper(**task_kwargs)
                 finally:
                     self._cleanup_empty_created_dirs()
 
-    def clone_file_tree_structure(self, in_files: List[str], output_directory: str) -> List[str]:
+    def clone_file_tree_structure(
+        self, in_files: List[str], output_directory: str
+    ) -> List[str]:
         common_path = os.path.commonpath(in_files)
         output_dirs = [
             os.path.join(
@@ -504,10 +523,7 @@ class BatchHandler:
             dirs_to_check += [self.output_directory]
 
         for directory in dirs_to_check:
-            if (
-                os.path.exists(directory)
-                and len(os.listdir(directory)) == 0
-            ):
+            if os.path.exists(directory) and len(os.listdir(directory)) == 0:
                 os.removedirs(directory)
 
 
@@ -526,7 +542,7 @@ def _hideprogressbar(progress: Progress):
         finally:
             pass
         return
-    transient = progress.live.transient # save the old value
+    transient = progress.live.transient  # save the old value
     progress.live.transient = True
     progress.stop()
     try:
@@ -534,5 +550,5 @@ def _hideprogressbar(progress: Progress):
     finally:
         # make space for the progress to use so it doesn't overwrite any previous lines
         print("\n" * (len(progress.tasks) - 2))
-        progress.live.transient = transient # restore the old value
+        progress.live.transient = transient  # restore the old value
         progress.start()
