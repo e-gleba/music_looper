@@ -1,10 +1,5 @@
 # pymusiclooper
 
-[![downloads](https://static.pepy.tech/badge/pymusiclooper)](https://pepy.tech/project/pymusiclooper)
-[![downloads](https://static.pepy.tech/badge/pymusiclooper/month)](https://pepy.tech/project/pymusiclooper)
-[![pypi pyversions](https://img.shields.io/pypi/v/pymusiclooper.svg)](https://pypi.python.org/pypi/pymusiclooper/)
-[![pypi pyversions](https://img.shields.io/pypi/pyversions/pymusiclooper.svg)](https://pypi.python.org/pypi/pymusiclooper/)
-
 a python-based program for repeating music seamlessly and endlessly, by automatically finding the best loop points.
 
 features:
@@ -202,11 +197,3 @@ pymusiclooper -i export-points --path "/path/to/track.mp3" --approx-loop-positio
 ## acknowledgement
 
 this project started out as a fork of [nolan nicholson](https://github.com/nolannicholson)'s project [looper](https://github.com/nolannicholson/looper/). although at this point only a few lines of code remain from that project due to adopting a completely different approach and implementation; this project would not have been possible without their initial contribution.
-
-## version history
-
-available at [changelog.md](changelog.md)
-
-## star history
-
-[![star history chart](https://api.star-history.com/svg?repos=arkrow/pymusiclooper&type=date)](https://www.star-history.com/#arkrow/pymusiclooper&date)
