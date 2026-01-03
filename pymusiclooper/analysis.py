@@ -31,6 +31,391 @@ class LoopPair:
     loop_end: int = 0
 
 
+CHROMA_PERCEPTUAL_WEIGHTS = np.array(
+    [1.0, 0.95, 1.05, 1.0, 1.15, 1.1, 1.15, 1.2, 1.15, 1.1, 1.0, 0.95], dtype=np.float64
+)
+
+
+@njit(cache=True, fastmath=True)
+def _precompute_weighted_chroma(
+    chroma: np.ndarray,
+    weights: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Precompute weighted chroma and norms for all frames."""
+    n_bins, n_frames = chroma.shape
+
+    weighted = np.empty((n_bins, n_frames), dtype=np.float64)
+    norms = np.empty(n_frames, dtype=np.float64)
+
+    for f in range(n_frames):
+        norm_sq = 0.0
+        for b in range(n_bins):
+            wc = weights[b] * chroma[b, f]
+            weighted[b, f] = wc
+            norm_sq += wc * wc
+        norms[f] = np.sqrt(norm_sq)
+
+    return weighted, norms
+
+
+@njit(cache=True, fastmath=True)
+def _precompute_power_max(power_db: np.ndarray) -> np.ndarray:
+    """Precompute max power for each frame."""
+    n_bins, n_frames = power_db.shape
+    power_max = np.empty(n_frames, dtype=np.float64)
+
+    for f in range(n_frames):
+        pmax = power_db[0, f]
+        for b in range(1, n_bins):
+            if power_db[b, f] > pmax:
+                pmax = power_db[b, f]
+        power_max[f] = pmax
+
+    return power_max
+
+
+@njit(cache=True, fastmath=True)
+def _precompute_spectral_flux(chroma: np.ndarray) -> np.ndarray:
+    """Precompute spectral flux for all frames."""
+    n_bins, n_frames = chroma.shape
+    flux = np.zeros(n_frames, dtype=np.float64)
+
+    for f in range(1, n_frames - 1):
+        val = 0.0
+        for b in range(n_bins):
+            diff_fwd = chroma[b, f + 1] - chroma[b, f]
+            diff_bwd = chroma[b, f] - chroma[b, f - 1]
+            if diff_fwd > 0:
+                val += diff_fwd * diff_fwd
+            if diff_bwd > 0:
+                val += diff_bwd * diff_bwd
+        flux[f] = np.sqrt(val)
+
+    max_flux = flux.max()
+    if max_flux > 1e-10:
+        for f in range(n_frames):
+            flux[f] /= max_flux
+
+    return flux
+
+
+@njit(cache=True, fastmath=True)
+def _precompute_masking_factors(
+    power_max: np.ndarray,
+    window: int = 3,
+) -> np.ndarray:
+    """Precompute temporal masking factors."""
+    n_frames = len(power_max)
+    masking = np.full(n_frames, 0.5, dtype=np.float64)
+
+    sorted_power = np.sort(power_max)
+    median_energy = sorted_power[n_frames // 2]
+
+    if median_energy < -60:
+        return masking
+
+    for f in range(n_frames - window):
+        energy_after = 0.0
+        for i in range(window):
+            energy_after += power_max[f + i]
+        energy_after /= window
+
+        m = (energy_after - median_energy + 10.0) / 20.0
+        masking[f] = max(0.0, min(1.0, m))
+
+    return masking
+
+
+@njit(cache=True, fastmath=True)
+def _loudness_jnd(db_diff: float, jnd_db: float = 1.0) -> float:
+    """JND-aware loudness distance."""
+    if abs(db_diff) <= jnd_db:
+        return 0.0
+    return np.log1p(abs(db_diff) - jnd_db) / np.log1p(10.0)
+
+
+@njit(cache=True, fastmath=True)
+def _find_and_score_candidates(
+    weighted_chroma: np.ndarray,
+    chroma_norms: np.ndarray,
+    power_max: np.ndarray,
+    flux: np.ndarray,
+    masking: np.ndarray,
+    beats: np.ndarray,
+    min_dur: int,
+    max_dur: int,
+    neighbor_window: int = 3,
+) -> List[Tuple[int, int, float, float]]:
+    """Combined candidate finding + scoring using list (no pre-allocation)."""
+    n_bins = weighted_chroma.shape[0]
+    n_frames = weighted_chroma.shape[1]
+    n_beats = len(beats)
+
+    SIM_THRESH = 0.80
+    LOUD_MAX = 3.5
+
+    W_POINT = 0.25
+    W_BOUNDARY = 0.25
+    W_NEIGHBOR = 0.20
+    W_FLUX = 0.15
+    W_LOUD = 0.15
+
+    candidates = []
+
+    for end_idx in range(n_beats):
+        loop_end = beats[end_idx]
+
+        if loop_end < 1 or loop_end >= n_frames - neighbor_window:
+            continue
+
+        norm_end = chroma_norms[loop_end]
+        if norm_end < 1e-10:
+            continue
+
+        min_start = loop_end - max_dur
+        max_start = loop_end - min_dur
+
+        for start_idx in range(n_beats):
+            loop_start = beats[start_idx]
+
+            if loop_start > max_start:
+                break
+            if loop_start < min_start:
+                continue
+            if loop_start < neighbor_window or loop_start >= n_frames - neighbor_window:
+                continue
+
+            norm_start = chroma_norms[loop_start]
+            if norm_start < 1e-10:
+                continue
+
+            # Point similarity
+            dot = 0.0
+            for b in range(n_bins):
+                dot += weighted_chroma[b, loop_end] * weighted_chroma[b, loop_start]
+            sim_point = dot / (norm_end * norm_start)
+
+            if sim_point < SIM_THRESH:
+                continue
+
+            loud_diff = abs(power_max[loop_end] - power_max[loop_start])
+            if loud_diff > LOUD_MAX:
+                continue
+
+            # === QUALITY SCORING ===
+            d_point = 1.0 - sim_point
+
+            # Boundary continuity
+            norm_pre = chroma_norms[loop_end - 1]
+            if norm_pre > 1e-10:
+                dot_boundary = 0.0
+                for b in range(n_bins):
+                    dot_boundary += (
+                        weighted_chroma[b, loop_end - 1]
+                        * weighted_chroma[b, loop_start]
+                    )
+                sim_boundary = dot_boundary / (norm_pre * norm_start)
+            else:
+                sim_boundary = 0.0
+            d_boundary = 1.0 - sim_boundary
+
+            # Neighborhood stability
+            sim_sum = 0.0
+            nc = 0
+            for w in range(-neighbor_window, neighbor_window + 1):
+                sf = loop_start + w
+                ef = loop_end + w
+                if 0 <= sf < n_frames and 0 <= ef < n_frames:
+                    n_sf = chroma_norms[sf]
+                    n_ef = chroma_norms[ef]
+                    if n_sf > 1e-10 and n_ef > 1e-10:
+                        dot_n = 0.0
+                        for b in range(n_bins):
+                            dot_n += weighted_chroma[b, sf] * weighted_chroma[b, ef]
+                        sim_sum += dot_n / (n_sf * n_ef)
+                        nc += 1
+            d_neighbor = 1.0 - (sim_sum / nc) if nc > 0 else 1.0
+
+            d_flux = (flux[loop_start] + flux[loop_end]) / 2.0
+            d_loud = _loudness_jnd(loud_diff, 1.0)
+
+            Q = (
+                W_POINT * d_point
+                + W_BOUNDARY * d_boundary
+                + W_NEIGHBOR * d_neighbor
+                + W_FLUX * d_flux
+                + W_LOUD * d_loud
+            )
+
+            Q *= 1.0 - 0.2 * masking[loop_start]
+
+            candidates.append((loop_start, loop_end, Q, d_loud))
+
+    return candidates
+
+
+@njit(cache=True, fastmath=True)
+def _find_and_score_chunked(
+    weighted_chroma: np.ndarray,
+    chroma_norms: np.ndarray,
+    power_max: np.ndarray,
+    flux: np.ndarray,
+    masking: np.ndarray,
+    beats: np.ndarray,
+    min_dur: int,
+    max_dur: int,
+    chunk_start: int,
+    chunk_end: int,
+    neighbor_window: int = 3,
+) -> List[Tuple[int, int, float, float]]:
+    """Process a chunk of end indices (for memory-safe parallelism)."""
+    n_bins = weighted_chroma.shape[0]
+    n_frames = weighted_chroma.shape[1]
+    n_beats = len(beats)
+
+    SIM_THRESH = 0.80
+    LOUD_MAX = 3.5
+
+    W_POINT = 0.25
+    W_BOUNDARY = 0.25
+    W_NEIGHBOR = 0.20
+    W_FLUX = 0.15
+    W_LOUD = 0.15
+
+    candidates = []
+
+    for end_idx in range(chunk_start, min(chunk_end, n_beats)):
+        loop_end = beats[end_idx]
+
+        if loop_end < 1 or loop_end >= n_frames - neighbor_window:
+            continue
+
+        norm_end = chroma_norms[loop_end]
+        if norm_end < 1e-10:
+            continue
+
+        min_start = loop_end - max_dur
+        max_start = loop_end - min_dur
+
+        for start_idx in range(n_beats):
+            loop_start = beats[start_idx]
+
+            if loop_start > max_start:
+                break
+            if loop_start < min_start:
+                continue
+            if loop_start < neighbor_window or loop_start >= n_frames - neighbor_window:
+                continue
+
+            norm_start = chroma_norms[loop_start]
+            if norm_start < 1e-10:
+                continue
+
+            dot = 0.0
+            for b in range(n_bins):
+                dot += weighted_chroma[b, loop_end] * weighted_chroma[b, loop_start]
+            sim_point = dot / (norm_end * norm_start)
+
+            if sim_point < SIM_THRESH:
+                continue
+
+            loud_diff = abs(power_max[loop_end] - power_max[loop_start])
+            if loud_diff > LOUD_MAX:
+                continue
+
+            d_point = 1.0 - sim_point
+
+            norm_pre = chroma_norms[loop_end - 1]
+            if norm_pre > 1e-10:
+                dot_boundary = 0.0
+                for b in range(n_bins):
+                    dot_boundary += (
+                        weighted_chroma[b, loop_end - 1]
+                        * weighted_chroma[b, loop_start]
+                    )
+                sim_boundary = dot_boundary / (norm_pre * norm_start)
+            else:
+                sim_boundary = 0.0
+            d_boundary = 1.0 - sim_boundary
+
+            sim_sum = 0.0
+            nc = 0
+            for w in range(-neighbor_window, neighbor_window + 1):
+                sf = loop_start + w
+                ef = loop_end + w
+                if 0 <= sf < n_frames and 0 <= ef < n_frames:
+                    n_sf = chroma_norms[sf]
+                    n_ef = chroma_norms[ef]
+                    if n_sf > 1e-10 and n_ef > 1e-10:
+                        dot_n = 0.0
+                        for b in range(n_bins):
+                            dot_n += weighted_chroma[b, sf] * weighted_chroma[b, ef]
+                        sim_sum += dot_n / (n_sf * n_ef)
+                        nc += 1
+            d_neighbor = 1.0 - (sim_sum / nc) if nc > 0 else 1.0
+
+            d_flux = (flux[loop_start] + flux[loop_end]) / 2.0
+            d_loud = _loudness_jnd(loud_diff, 1.0)
+
+            Q = (
+                W_POINT * d_point
+                + W_BOUNDARY * d_boundary
+                + W_NEIGHBOR * d_neighbor
+                + W_FLUX * d_flux
+                + W_LOUD * d_loud
+            )
+
+            Q *= 1.0 - 0.2 * masking[loop_start]
+
+            candidates.append((loop_start, loop_end, Q, d_loud))
+
+    return candidates
+
+
+def _find_candidates_parallel_safe(
+    weighted_chroma: np.ndarray,
+    chroma_norms: np.ndarray,
+    power_max: np.ndarray,
+    flux: np.ndarray,
+    masking: np.ndarray,
+    beats: np.ndarray,
+    min_dur: int,
+    max_dur: int,
+    n_jobs: int = 4,
+) -> List[Tuple[int, int, float, float]]:
+    """Memory-safe parallel processing using chunked approach."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    n_beats = len(beats)
+    chunk_size = max(1, n_beats // n_jobs)
+
+    all_candidates = []
+
+    # Process in chunks to avoid massive pre-allocation
+    with ThreadPoolExecutor(max_workers=n_jobs) as executor:
+        futures = []
+        for i in range(0, n_beats, chunk_size):
+            future = executor.submit(
+                _find_and_score_chunked,
+                weighted_chroma,
+                chroma_norms,
+                power_max,
+                flux,
+                masking,
+                beats,
+                min_dur,
+                max_dur,
+                i,
+                i + chunk_size,
+            )
+            futures.append(future)
+
+        for future in futures:
+            all_candidates.extend(future.result())
+
+    return all_candidates
+
+
 def find_best_loop_points(
     mlaudio: MLAudio,
     min_duration_multiplier: float = 0.35,
@@ -41,11 +426,10 @@ def find_best_loop_points(
     brute_force: bool = False,
     disable_pruning: bool = False,
 ) -> List[LoopPair]:
-    """Finds the best loop points for a given audio track."""
+    """Finds the best loop points using optimized psychoacoustic model."""
     runtime_start = time.perf_counter()
-    s2f = mlaudio.seconds_to_frames  # Local alias for repeated calls
+    s2f = mlaudio.seconds_to_frames
 
-    # Duration bounds (in frames)
     total_frames = s2f(mlaudio.total_duration)
     min_dur = (
         s2f(min_loop_duration)
@@ -59,12 +443,20 @@ def find_best_loop_points(
 
     if approx_mode or brute_force:
         chroma, power_db, _, _ = _analyze_audio(mlaudio, skip_beat_analysis=True)
-        bpm = 120.0
+
+        if brute_force:
+            onset_env = librosa.onset.onset_strength(y=mlaudio.audio, sr=mlaudio.rate)
+            bpm = float(
+                librosa.feature.tempo(onset_envelope=onset_env, sr=mlaudio.rate)[0]
+            )
+            logging.info(f"Brute force: estimated tempo {bpm:.1f} BPM")
+        else:
+            bpm = 120.0
 
         if approx_mode:
             start_frame = s2f(approx_loop_start, apply_trim_offset=True)
             end_frame = s2f(approx_loop_end, apply_trim_offset=True)
-            window = s2f(2)  # +/- 2 seconds
+            window = s2f(2)
 
             min_dur = (end_frame - window) - (start_frame + window) - 1
             max_dur = (end_frame + window) - (start_frame - window) + 1
@@ -81,39 +473,85 @@ def find_best_loop_points(
                     ),
                 ]
             )
-        else:  # brute_force
-            beats = np.arange(chroma.shape[-1], dtype=int)
+        else:
+            beats = np.arange(chroma.shape[-1], dtype=np.int64)
             n_iter = int(beats.size**2 * (1 - min_dur / chroma.shape[-1]))
             logging.info(f"Brute force: {beats.size} frames, ~{n_iter} iterations")
-            logging.info("**NOTICE** Processing may take several minutes.")
     else:
         chroma, power_db, bpm, beats = _analyze_audio(mlaudio)
         logging.info(f"Detected {beats.size} beats at {bpm:.0f} bpm")
 
     logging.info(f"Initial processing: {time.perf_counter() - runtime_start:.3f}s")
 
-    # Find candidate pairs
     t0 = time.perf_counter()
+
+    if brute_force:
+        weights = CHROMA_PERCEPTUAL_WEIGHTS
+
+        # Precomputation (O(n))
+        weighted_chroma, chroma_norms = _precompute_weighted_chroma(chroma, weights)
+        power_max = _precompute_power_max(power_db)
+        flux = _precompute_spectral_flux(chroma)
+        masking = _precompute_masking_factors(power_max)
+
+        weighted_chroma = np.ascontiguousarray(weighted_chroma)
+
+        logging.info(f"Precomputation: {time.perf_counter() - t0:.3f}s")
+        t1 = time.perf_counter()
+
+        # Use chunked parallel for large inputs, sequential for small
+        if len(beats) > 2000:
+            import os
+
+            n_jobs = max(1, os.cpu_count() - 1)
+            raw_pairs = _find_candidates_parallel_safe(
+                weighted_chroma,
+                chroma_norms,
+                power_max,
+                flux,
+                masking,
+                beats,
+                min_dur,
+                max_dur,
+                n_jobs=n_jobs,
+            )
+        else:
+            raw_pairs = _find_and_score_candidates(
+                weighted_chroma,
+                chroma_norms,
+                power_max,
+                flux,
+                masking,
+                beats,
+                min_dur,
+                max_dur,
+            )
+
+        # Sort by quality score
+        raw_pairs = sorted(raw_pairs, key=lambda x: x[2])
+
+        logging.info(f"Search + scoring: {time.perf_counter() - t1:.3f}s")
+    else:
+        raw_pairs = _find_candidate_pairs(chroma, power_db, beats, min_dur, max_dur)
+
+    logging.info(
+        f"Found {len(raw_pairs)} candidates in {time.perf_counter() - t0:.3f}s"
+    )
+
+    if not raw_pairs:
+        raise LoopNotFoundError(
+            f'No loop points found for "{mlaudio.filename}" with current parameters.'
+        )
+
     candidate_pairs = [
         LoopPair(
             _loop_start_frame_idx=start,
             _loop_end_frame_idx=end,
-            note_distance=note_dist,
-            loudness_difference=loud_diff,
+            note_distance=score,
+            loudness_difference=loud,
         )
-        for start, end, note_dist, loud_diff in _find_candidate_pairs(
-            chroma, power_db, beats, min_dur, max_dur
-        )
+        for start, end, score, loud in raw_pairs
     ]
-
-    logging.info(
-        f"Found {len(candidate_pairs)} candidates in {time.perf_counter() - t0:.3f}s"
-    )
-
-    if not candidate_pairs:
-        raise LoopNotFoundError(
-            f'No loop points found for "{mlaudio.filename}" with current parameters.'
-        )
 
     filtered = _assess_and_filter_loop_pairs(
         mlaudio, chroma, bpm, candidate_pairs, disable_pruning
@@ -122,7 +560,6 @@ def find_best_loop_points(
     if len(filtered) > 1:
         _prioritize_duration(filtered)
 
-    # Adjust to nearest zero crossings
     for pair in filtered:
         if mlaudio.trim_offset > 0:
             pair._loop_start_frame_idx = int(
