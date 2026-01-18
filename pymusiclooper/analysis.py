@@ -9,6 +9,8 @@ from numba import njit
 
 from pymusiclooper.audio import MLAudio
 
+import numpy.typing as npt
+
 
 @dataclass
 class LoopPair:
@@ -400,35 +402,49 @@ def _calculate_loop_score(
 def _calculate_subseq_beat_similarity(
     b1_start: int,
     b2_start: int,
-    chroma: np.ndarray,
+    chroma: np.ndarray,  # or npt.NDArray[np.float32]
     test_end_offset: int,
-    weights: Optional[np.ndarray] = None,
+    weights: np.ndarray | None = None,
 ) -> float:
-    """Calculates cosine similarity of subsequent/preceding frames at two positions."""
+    """
+    Calculates cosine similarity of subsequent/preceding frames at two positions.
 
+    Args:
+        b1_start: Start index for first position (int).
+        b2_start: Start index for second position (int).
+        chroma: Chroma array, shape (n_features, n_frames).
+        test_end_offset: Offset for test end (int, positive=forward, negative=backward).
+        weights: Optional weights for averaging (shape: (test_len,)), or None.
+
+    Returns:
+        Weighted average cosine similarity (float) between the two chroma segments.
+
+    Raises:
+        ValueError: If chroma is not 2D or indices are out of bounds.
+    """
     chroma_len = chroma.shape[-1]
     test_len = abs(test_end_offset)
 
-    # Compute slice bounds
     if test_end_offset < 0:
         offset = min(test_len, b1_start, b2_start)
-        s1, s2 = slice(b1_start - offset, b1_start), slice(b2_start - offset, b2_start)
+        s1 = slice(b1_start - offset, b1_start)
+        s2 = slice(b2_start - offset, b2_start)
     else:
         offset = min(test_len, chroma_len - b1_start, chroma_len - b2_start)
-        s1, s2 = slice(b1_start, b1_start + offset), slice(b2_start, b2_start + offset)
+        s1 = slice(b1_start, b1_start + offset)
+        s2 = slice(b2_start, b2_start + offset)
 
-    b1_slice, b2_slice = chroma[:, s1], chroma[:, s2]
+    b1_slice = chroma[:, s1]
+    b2_slice = chroma[:, s2]
 
-    # Cosine similarity per frame
-    dot = np.einsum("ij,ij->j", b1_slice, b2_slice)
+    dot = np.einsum("ij,ij->j", b1_slice, b2_slice, optimize=True)
     norms = np.linalg.norm(b1_slice, axis=0) * np.linalg.norm(b2_slice, axis=0)
     cosine_sim = dot / np.maximum(norms, 1e-10)
 
-    # Pad with zeros if shorter than expected (penalizes truncated tests)
     if offset < test_len:
         cosine_sim = np.pad(cosine_sim, (0, test_len - offset))
 
-    return np.average(cosine_sim, weights=weights)
+    return float(np.average(cosine_sim, weights=weights))
 
 
 def _weights(length: int, start: int = 100, stop: int = 1):
@@ -439,10 +455,9 @@ def _weights(length: int, start: int = 100, stop: int = 1):
 def nearest_zero_crossing(audio: np.ndarray, rate: int, sample_idx: int) -> int:
     """Finds the nearest rising zero crossing with minimal local amplitude.
 
-    Simplified algorithm:
-    - Detects actual sign changes (zero crossings)
-    - Prefers rising crossings (negative→positive) for smoother splices
-    - Scores by: local amplitude + distance from target
+    - Vectorized: no Python loops over samples or channels.
+    - Prefers rising crossings (negative→positive).
+    - Scores by: local amplitude + distance from target.
     """
     n_samples, n_channels = audio.shape
     window_size = max(2, rate // 100)  # ~10ms window
@@ -450,37 +465,40 @@ def nearest_zero_crossing(audio: np.ndarray, rate: int, sample_idx: int) -> int:
 
     start = max(0, sample_idx - half_win)
     end = min(n_samples, sample_idx + half_win + 1)
-
     if end - start < 2:
         return sample_idx
 
-    # Mix to mono for crossing detection
-    mono = audio[start:end, 0].copy()
-    for ch in range(1, n_channels):
-        mono += audio[start:end, ch]
+    # Mix to mono (sum across channels)
+    mono = np.sum(audio[start:end], axis=1)
 
+    # Find zero crossings: sign change from negative to positive (rising)
+    prev = mono[:-1]
+    curr = mono[1:]
+    crossings = (prev < 0) & (curr >= 0)
+
+    if not np.any(crossings):
+        return sample_idx
+
+    # Indices of rising zero crossings (relative to window)
+    cross_idx = np.nonzero(crossings)[0] + 1
+
+    # Local amplitude at crossing (average abs of prev/curr, normalized)
+    amplitudes = (np.abs(prev[crossings]) + np.abs(curr[crossings])) / n_channels
+
+    # Distance penalty (relative to window center)
     center = sample_idx - start
-    best_idx, best_score = -1, np.inf
+    distances = 0.3 * np.abs(cross_idx - center) / max(1, half_win)
 
-    for i in range(1, len(mono)):
-        prev, curr = mono[i - 1], mono[i]
+    # Score: amplitude + distance
+    scores = amplitudes + distances
 
-        # Skip non-crossings (same sign)
-        if prev * curr > 0:
-            continue
+    # Find best crossing
+    best = np.argmin(scores)
+    best_score = scores[best]
+    best_idx = cross_idx[best]
 
-        # Score components (lower = better)
-        amplitude = (abs(prev) + abs(curr)) / n_channels  # Local amplitude
-        distance = 0.3 * abs(i - center) / half_win  # Distance penalty
-        falling = 0.15 if prev > 0 else 0.0  # Prefer rising crossings
-
-        score = amplitude + distance + falling
-
-        if score < best_score:
-            best_score, best_idx = score, i
-
-    # Reject if no crossing found or score too poor
-    if best_idx < 0 or best_score > 0.8 * n_channels:
+    # Reject if score too poor
+    if best_score > 0.8 * n_channels:
         return sample_idx
 
     return start + best_idx
