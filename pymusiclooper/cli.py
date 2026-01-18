@@ -20,7 +20,6 @@ from yt_dlp.utils import YoutubeDLError
 from pymusiclooper import __version__
 from pymusiclooper.console import _COMMAND_GROUPS, _OPTION_GROUPS, rich_console
 from pymusiclooper.core import MusicLooper
-from pymusiclooper.exceptions import AudioLoadError, LoopNotFoundError
 from pymusiclooper.handler import BatchHandler, LoopExportHandler, LoopHandler
 from pymusiclooper.utils import download_audio, get_outputdir, mk_outputdir
 
@@ -61,13 +60,8 @@ def _handle_errors(func):
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
-        except YoutubeDLError:
-            pass  # Already logged
-        except (AudioLoadError, LoopNotFoundError, Exception) as e:
-            if _env_flag("PML_DEBUG"):
-                rich_console.print_exception(suppress=[click])
-            else:
-                logging.error(e)
+        except Exception as e:
+            logging.error(e)
 
     return wrapper
 

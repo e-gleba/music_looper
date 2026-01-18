@@ -4,8 +4,6 @@ from typing import Tuple
 import librosa
 import numpy as np
 
-from pymusiclooper.exceptions import AudioLoadError
-
 
 class MLAudio:
     """Wrapper class for loading audio files for PyMusicLooper."""
@@ -29,17 +27,17 @@ class MLAudio:
         try:
             raw_audio, sr = librosa.load(path, sr=None, mono=False)
         except Exception as e:
-            raise AudioLoadError(
+            raise RuntimeError(
                 f"{path.name} could not be loaded. Invalid audio data or unsupported format."
             ) from e
 
         if raw_audio.size == 0:
-            raise AudioLoadError(f'No audio data could be loaded from "{path}".')
+            raise RuntimeError(f'No audio data could be loaded from "{path}".')
 
         mono = librosa.to_mono(raw_audio)
 
         if mono.min() == 0 == mono.max():
-            raise AudioLoadError(f'"{path}" contains only silence.')
+            raise RuntimeLoadError(f'"{path}" contains only silence.')
 
         # Normalize and trim
         mono /= np.abs(mono).max()

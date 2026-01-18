@@ -10,7 +10,6 @@ from rich.table import Table
 from pymusiclooper.analysis import LoopPair
 from pymusiclooper.console import rich_console
 from pymusiclooper.core import MusicLooper
-from pymusiclooper.exceptions import AudioLoadError, LoopNotFoundError
 from pymusiclooper.utils import DEFAULT_OUTPUT_DIR
 
 
@@ -499,8 +498,6 @@ class BatchHandler:
         try:
             export_handler = LoopExportHandler(**kwargs, batch_mode=True)
             export_handler.run()
-        except (AudioLoadError, LoopNotFoundError) as e:
-            logging.error(e)
         except Exception as e:
             logging.error(e)
 

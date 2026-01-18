@@ -8,7 +8,6 @@ import numpy as np
 from numba import njit
 
 from pymusiclooper.audio import MLAudio
-from pymusiclooper.exceptions import LoopNotFoundError
 
 
 @dataclass
@@ -111,7 +110,7 @@ def find_best_loop_points(
     )
 
     if not candidate_pairs:
-        raise LoopNotFoundError(
+        raise RuntimeError(
             f'No loop points found for "{mlaudio.filename}" with current parameters.'
         )
 
@@ -144,7 +143,7 @@ def find_best_loop_points(
         )
 
     if not filtered:
-        raise LoopNotFoundError(
+        raise RuntimeError(
             f'No loop points found for "{mlaudio.filename}" with current parameters.'
         )
 
@@ -184,7 +183,7 @@ def _analyze_audio(
         bpm = bpm.item() if isinstance(bpm, np.ndarray) else bpm
 
     except Exception as e:
-        raise LoopNotFoundError(
+        raise RuntimeError(
             f'Beat analysis failed for "{mlaudio.filename}". Cannot continue.'
         ) from e
 
