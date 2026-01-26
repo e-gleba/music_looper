@@ -15,7 +15,6 @@ from rich_click.patch import patch as rich_click_patch
 rich_click_patch()
 from click_option_group import RequiredMutuallyExclusiveOptionGroup, optgroup
 from click_params import URL as UrlParamType
-from yt_dlp.utils import YoutubeDLError
 
 from pymusiclooper import __version__
 from pymusiclooper.console import _COMMAND_GROUPS, _OPTION_GROUPS, rich_console

@@ -1,11 +1,6 @@
-"""Contains the core MusicLooper class that can be
-used for programmatic access to the CLI's main features."""
-
 import os
 import shutil
-from math import ceil
 from pathlib import Path
-from typing import List, Optional, Tuple, Union
 
 import lazy_loader as lazy
 import numpy as np
@@ -14,7 +9,6 @@ from pymusiclooper.analysis import LoopPair, find_best_loop_points
 from pymusiclooper.audio import MLAudio
 from pymusiclooper.playback import PlaybackHandler
 
-# Lazy-load external libraries when they're needed
 soundfile = lazy.load("soundfile")
 
 
@@ -32,13 +26,13 @@ class MusicLooper:
     def find_loop_pairs(
         self,
         min_duration_multiplier: float = 0.35,
-        min_loop_duration: Optional[float] = None,
-        max_loop_duration: Optional[float] = None,
-        approx_loop_start: Optional[float] = None,
-        approx_loop_end: Optional[float] = None,
+        min_loop_duration: float | None = None,
+        max_loop_duration: float | None = None,
+        approx_loop_start: float | None = None,
+        approx_loop_end: float | None = None,
         brute_force: bool = False,
         disable_pruning: bool = False,
-    ) -> List[LoopPair]:
+    ) -> list[LoopPair]:
         """Finds the best loop points for the track, according to the parameters specified.
 
         Args:
@@ -119,7 +113,7 @@ class MusicLooper:
         loop_start: int,
         loop_end: int,
         format: str = "WAV",
-        output_dir: Optional[str] = None,
+        output_dir: str | None = None,
     ):
         """Exports the audio into three files: intro, loop and outro.
 
@@ -251,10 +245,10 @@ class MusicLooper:
 
     def export_txt(
         self,
-        loop_start: Union[int, float, str],
-        loop_end: Union[str, int, float, str],
+        loop_start: int | float | str,
+        loop_end: str | int | float | str,
         txt_name: str = "loops",
-        output_dir: Optional[str] = None,
+        output_dir: str | None = None,
     ):
         """Exports the given loop points to a text file named `loop.txt` in append mode with the format:
         `{loop_start} {loop_end} {filename}`
@@ -277,7 +271,7 @@ class MusicLooper:
 
     def _find_start_tag(
         self,
-        file_tags: dict[str, List[str]],
+        file_tags: dict[str, list[str]],
     ) -> str:
         # List derived from:
         # https://github.com/libsdl-org/SDL_mixer/blob/5175907b515ea9e07d0b35849bfaf09870d07d33/src/codecs/music_ogg.c#L289-L302
@@ -305,7 +299,7 @@ class MusicLooper:
 
     def _find_end_tag(
         self,
-        file_tags: dict[str, List[str]],
+        file_tags: dict[str, list[str]],
     ) -> str:
         known_tags = [
             "LOOPE",
@@ -329,7 +323,7 @@ class MusicLooper:
     def _end_tag_is_offset(
         self,
         loop_end_tag: str,
-        is_offset: Optional[bool],
+        is_offset: bool | None,
     ) -> bool:
         if is_offset is not None:
             return is_offset
@@ -344,9 +338,9 @@ class MusicLooper:
         loop_end: int,
         loop_start_tag: str,
         loop_end_tag: str,
-        is_offset: Optional[bool] = None,
-        output_dir: Optional[str] = None,
-    ) -> Tuple[str]:
+        is_offset: bool | None = None,
+        output_dir: str | None = None,
+    ) -> tuple[str]:
         """Adds metadata tags of loop points to a copy of the source audio file.
 
         Args:
@@ -382,8 +376,8 @@ class MusicLooper:
         return str(loop_start), str(loop_end)
 
     def read_tags(
-        self, loop_start_tag: str, loop_end_tag: str, is_offset: Optional[bool] = None
-    ) -> Tuple[int, int]:
+        self, loop_start_tag: str, loop_end_tag: str, is_offset: bool | None = None
+    ) -> tuple[int, int]:
         """Reads the tags provided from the file and returns the read loop points
 
         Args:

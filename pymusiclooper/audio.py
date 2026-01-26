@@ -1,5 +1,4 @@
 from pathlib import Path
-from typing import Tuple
 
 import librosa
 import numpy as np
@@ -37,7 +36,7 @@ class MLAudio:
         mono = librosa.to_mono(raw_audio)
 
         if mono.min() == 0 == mono.max():
-            raise RuntimeLoadError(f'"{path}" contains only silence.')
+            raise RuntimeError(f'"{path}" contains only silence.')
 
         # Normalize and trim
         mono /= np.abs(mono).max()

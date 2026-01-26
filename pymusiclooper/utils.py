@@ -1,5 +1,3 @@
-"""General utility functions."""
-
 from pathlib import Path
 
 from pymusiclooper.youtube import YoutubeDownloader

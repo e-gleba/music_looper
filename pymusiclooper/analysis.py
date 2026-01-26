@@ -1,15 +1,11 @@
-import logging
 import time
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
 
 import librosa
 import numpy as np
 from numba import njit
 
 from pymusiclooper.audio import MLAudio
-
-import numpy.typing as npt
 
 
 @dataclass
@@ -35,13 +31,13 @@ class LoopPair:
 def find_best_loop_points(
     mlaudio: "MLAudio",
     min_duration_multiplier: float = 0.35,
-    min_loop_duration: Optional[float] = None,
-    max_loop_duration: Optional[float] = None,
-    approx_loop_start: Optional[float] = None,
-    approx_loop_end: Optional[float] = None,
+    min_loop_duration: float | None = None,
+    max_loop_duration: float | None = None,
+    approx_loop_start: float | None = None,
+    approx_loop_end: float | None = None,
     brute_force: bool = False,
     disable_pruning: bool = False,
-) -> List["LoopPair"]:
+) -> list["LoopPair"]:
     t0 = time.perf_counter()
     s2f = mlaudio.seconds_to_frames
     total_frames = s2f(mlaudio.total_duration)
@@ -131,7 +127,7 @@ def find_best_loop_points(
 
 def _analyze_audio(
     mlaudio: MLAudio, skip_beat_analysis: bool = False
-) -> Tuple[np.ndarray, np.ndarray, float, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, float, np.ndarray]:
     """Performs the main audio analysis required."""
     S = librosa.stft(y=mlaudio.audio)
     S_power = S.real**2 + S.imag**2  # Faster than np.abs(S)**2
@@ -183,7 +179,7 @@ def _find_candidate_pairs(
     beats: np.ndarray,
     min_loop_duration: int,
     max_loop_duration: int,
-) -> List[Tuple[int, int, float, float]]:
+) -> list[tuple[int, int, float, float]]:
     """Generates a list of all valid candidate loop pairs."""
 
     NOTE_THRESH = 0.0875
@@ -256,9 +252,9 @@ def _assess_and_filter_loop_pairs(
     mlaudio: MLAudio,
     chroma: np.ndarray,
     bpm: float,
-    candidate_pairs: List[LoopPair],
+    candidate_pairs: list[LoopPair],
     disable_pruning: bool = False,
-) -> List[LoopPair]:
+) -> list[LoopPair]:
     """Assigns scores to each loop pair and prunes the candidate list."""
 
     # Calculate test duration in frames (~12 beats)
@@ -292,11 +288,11 @@ def _assess_and_filter_loop_pairs(
 
 
 def _prune_candidates(
-    candidate_pairs: List[LoopPair],
+    candidate_pairs: list[LoopPair],
     keep_top_notes: float = 75,
     keep_top_loudness: float = 50,
     acceptable_loudness: float = 0.25,
-) -> List[LoopPair]:
+) -> list[LoopPair]:
     """Prunes candidate pairs based on loudness and note distance thresholds."""
 
     epsilon = 1e-3
@@ -328,7 +324,7 @@ def _prune_candidates(
     return list(compress(candidate_pairs, mask))
 
 
-def _prioritize_duration(pair_list: List[LoopPair]) -> None:
+def _prioritize_duration(pair_list: list[LoopPair]) -> None:
     """Promotes the longest high-scoring loop to the front of the list (in-place)."""
 
     if len(pair_list) < 2:
@@ -361,7 +357,7 @@ def _calculate_loop_score(
     b2: int,
     chroma: np.ndarray,
     test_duration: int,
-    weights: Optional[np.ndarray] = None,
+    weights: np.ndarray | None = None,
 ) -> float:
     """Returns the best cosine similarity score (lookahead vs lookbehind) for two loop points."""
 

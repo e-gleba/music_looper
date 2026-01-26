@@ -3,8 +3,9 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import List, Literal, Optional, Tuple, Iterator
+from typing import Literal
 
 from rich.progress import MofNCompleteColumn, Progress, SpinnerColumn, TimeElapsedColumn
 from rich.table import Table
@@ -55,7 +56,7 @@ class LoopHandler:
         """Returns the handler's MusicLooper instance."""
         return self._musiclooper
 
-    def get_all_loop_pairs(self) -> List[LoopPair]:
+    def get_all_loop_pairs(self) -> list[LoopPair]:
         """Returns discovered loop points as a list of LoopPair objects."""
         return self.loop_pair_list
 
@@ -184,9 +185,9 @@ class LoopExportHandler(LoopHandler):
         path: str,
         min_duration_multiplier: float,
         output_dir: str,
-        min_loop_duration: Optional[float] = None,
-        max_loop_duration: Optional[float] = None,
-        approx_loop_position: Optional[tuple] = None,
+        min_loop_duration: float | None = None,
+        max_loop_duration: float | None = None,
+        approx_loop_position: tuple | None = None,
         brute_force: bool = False,
         disable_pruning: bool = False,
         split_audio: bool = False,
@@ -195,8 +196,8 @@ class LoopExportHandler(LoopHandler):
         to_stdout: bool = False,
         fmt: Literal["SAMPLES", "SECONDS", "TIME"] = "SAMPLES",
         alt_export_top: int = 0,
-        tag_names: Optional[Tuple[str, str]] = None,
-        tag_offset: Optional[bool] = None,
+        tag_names: tuple[str, str] | None = None,
+        tag_offset: bool | None = None,
         batch_mode: bool = False,
         extended_length: float = 0,
         fade_length: float = 0,
@@ -463,8 +464,8 @@ class BatchHandler:
                     self._cleanup_empty_created_dirs()
 
     def clone_file_tree_structure(
-        self, in_files: List[str], output_directory: str
-    ) -> List[str]:
+        self, in_files: list[str], output_directory: str
+    ) -> list[str]:
         common_path = os.path.commonpath(in_files)
         output_dirs = [
             os.path.join(
@@ -480,7 +481,7 @@ class BatchHandler:
         return output_dirs
 
     @staticmethod
-    def get_files_in_directory(dir_path: str, recursive: bool = False) -> List[str]:
+    def get_files_in_directory(dir_path: str, recursive: bool = False) -> list[str]:
         return (
             [
                 os.path.join(directory, filename)

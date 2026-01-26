@@ -1,5 +1,3 @@
-"""Module for playback through the terminal"""
-
 import importlib
 import logging
 import signal
