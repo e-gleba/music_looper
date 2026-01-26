@@ -260,7 +260,6 @@ def play(**kwargs):
 )
 @_handle_errors
 def play_tagged(path, tag_names, tag_offset):
-    """Play audio using loop points from file metadata tags."""
     looper = MusicLooper(path)
     start_tag, end_tag = tag_names or (None, None)
     loop_start, loop_end = looper.read_tags(start_tag, end_tag, tag_offset)
@@ -377,12 +376,10 @@ def export_points(**kwargs):
 )
 @_handle_errors
 def tag(**kwargs):
-    """Add loop point metadata tags to audio file copy."""
     _run_export_handler(**kwargs)
 
 
 def _run_export_handler(**kwargs):
-    """Common export handler logic."""
     _resolve_audio_path(kwargs, output_dir_required=True)
 
     if Path(kwargs["path"]).is_file():

@@ -5,8 +5,6 @@ import numpy as np
 
 
 class MLAudio:
-    """Wrapper class for loading audio files for PyMusicLooper."""
-
     __slots__ = (
         "filepath",
         "filename",
@@ -20,7 +18,6 @@ class MLAudio:
     )
 
     def __init__(self, filepath: str | Path) -> None:
-        """Load and initialize audio data from filepath."""
         path = Path(filepath)
 
         try:

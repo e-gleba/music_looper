@@ -13,13 +13,10 @@ from pymusiclooper.console import rich_console
 
 @lru_cache(maxsize=1)
 def sd():
-    """Lazy-load sounddevice module."""
     return importlib.import_module("sounddevice")
 
 
 class PlaybackHandler:
-    """Handler class for looping audio playback through the terminal."""
-
     def __init__(self) -> None:
         self.event = threading.Event()
         self.progressbar = Progress(
@@ -38,7 +35,6 @@ class PlaybackHandler:
 
     @contextmanager
     def _signal_handler(self):
-        """Temporarily override SIGINT with custom loop interrupt handler."""
         original = signal.signal(signal.SIGINT, self._loop_interrupt_handler)
         try:
             yield
@@ -54,8 +50,6 @@ class PlaybackHandler:
         loop_end: int,
         start_from: int = 0,
     ) -> None:
-        """Plays audio with a loop between loop_start and loop_end. Ctrl+C to interrupt."""
-
         total_samples = playback_data.shape[0]
 
         # Validate loop bounds

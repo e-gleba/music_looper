@@ -405,15 +405,6 @@ class BatchHandler:
         flatten: bool = False,
         **kwargs,
     ):
-        """Processes all audio files in a directory with `LoopExportHandler`.
-
-        Args:
-            path (str): Path to directory.
-            output_dir (str): Output directory to use for exports.
-            recursive (bool, optional): Process directories recursively. Defaults to False.
-            flatten (bool, optional): Flatten the output directory structure instead of preserving it when processing it recursively. Defaults to False.
-            kwargs: Additional `kwargs` are passed onto `LoopExportHandler`.
-        """
         self.directory_path = os.path.abspath(path)
         self.output_directory = output_dir
         self.recursive = recursive

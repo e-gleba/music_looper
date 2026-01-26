@@ -33,23 +33,6 @@ class MusicLooper:
         brute_force: bool = False,
         disable_pruning: bool = False,
     ) -> list[LoopPair]:
-        """Finds the best loop points for the track, according to the parameters specified.
-
-        Args:
-            min_duration_multiplier (float, optional): The minimum duration of a loop as a multiplier of track duration. Defaults to 0.35.
-            min_loop_duration (float, optional): The minimum duration of a loop (in seconds). Defaults to None.
-            max_loop_duration (float, optional): The maximum duration of a loop (in seconds). Defaults to None.
-            approx_loop_start (float, optional): The approximate location of the desired loop start (in seconds). If specified, must specify approx_loop_end as well. Defaults to None.
-            approx_loop_end (float, optional): The approximate location of the desired loop end (in seconds). If specified, must specify approx_loop_start as well. Defaults to None.
-            brute_force (bool, optional): Checks the entire track instead of the detected beats (disclaimer: runtime may be significantly longer). Defaults to False.
-            disable_pruning (bool, optional): Returns all the candidate loop points without filtering. Defaults to False.
-
-        Raises:
-            LoopNotFoundError: raised in case no loops were found
-
-        Returns:
-            List[LoopPair]: A list of `LoopPair` objects containing the loop points related data. See the `LoopPair` class for more info.
-        """
         return find_best_loop_points(
             mlaudio=self.mlaudio,
             min_duration_multiplier=min_duration_multiplier,
@@ -91,13 +74,6 @@ class MusicLooper:
         return self.mlaudio.samples_to_ftime(samples)
 
     def play_looping(self, loop_start: int, loop_end: int, start_from: int = 0):
-        """Plays an audio file with a loop active at the points specified
-
-        Args:
-            loop_start (int): Index of the loop start (in samples)
-            loop_end (int): Index of the loop end (in samples)
-            start_from (int, optional): Index of the sample point to start from. Defaults to 0.
-        """
         playback_handler = PlaybackHandler()
         playback_handler.play_looping(
             self.mlaudio.playback_audio,
@@ -115,14 +91,6 @@ class MusicLooper:
         format: str = "WAV",
         output_dir: str | None = None,
     ):
-        """Exports the audio into three files: intro, loop and outro.
-
-        Args:
-            loop_start (int): Loop start in samples.
-            loop_end (int): Loop end in samples.
-            format (str, optional): Audio format of the exported files (formats available depend on the `soundfile` library). Defaults to "WAV".
-            output_dir (str, optional): Path to the output directory. Defaults to the same diretcory as the source audio file.
-        """
         if output_dir is not None:
             out_path = os.path.join(output_dir, self.mlaudio.filename)
         else:
@@ -157,16 +125,11 @@ class MusicLooper:
         format: str = "WAV",
         output_dir: str | Path | None = None,
     ) -> str:
-        """Extends audio by looping to at least the specified length.
-
-        Returns the path to the extended audio file.
-        """
         audio = self.mlaudio.playback_audio
 
         if extended_length < self.mlaudio.total_duration:
             raise ValueError("Extended length must exceed original audio duration.")
 
-        # Determine output path
         out_path = (
             Path(output_dir) / self.mlaudio.filename
             if output_dir
@@ -250,15 +213,6 @@ class MusicLooper:
         txt_name: str = "loops",
         output_dir: str | None = None,
     ):
-        """Exports the given loop points to a text file named `loop.txt` in append mode with the format:
-        `{loop_start} {loop_end} {filename}`
-
-        Args:
-            loop_start (Union[int, float, str]): Loop start in samples, seconds or ftime.
-            loop_end (Union[int, float, str]): Loop end in samples, seconds or ftime.
-            txt_name (str, optional): Filename of the text file to export to. Defaults to "loops".
-            output_dir (str, optional): Path to the output directory. Defaults to the same directory as the source audio file.
-        """
         if output_dir is not None:
             out_path = os.path.join(output_dir, f"{txt_name}.txt")
         else:
@@ -341,16 +295,6 @@ class MusicLooper:
         is_offset: bool | None = None,
         output_dir: str | None = None,
     ) -> tuple[str]:
-        """Adds metadata tags of loop points to a copy of the source audio file.
-
-        Args:
-            loop_start (int): Loop start in samples.
-            loop_end (int): Loop end in samples.
-            loop_start_tag (str): Name of the loop_start metadata tag.
-            loop_end_tag (str): Name of the loop_end metadata tag.
-            is_offset (bool, optional): Export second tag as relative length / absolute end. Defaults to auto-detecting based on tag name.
-            output_dir (str, optional): Path to the output directory. Defaults to the same diretcory as the source audio file.
-        """
         # Workaround for taglib import issues on Apple silicon devices
         # Import taglib only when needed to isolate ImportErrors
         import taglib

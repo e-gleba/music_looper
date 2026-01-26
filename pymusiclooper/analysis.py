@@ -10,15 +10,6 @@ from pymusiclooper.audio import MLAudio
 
 @dataclass
 class LoopPair:
-    """A data class that encapsulates the loop point related data.
-    Contains:
-        loop_start: int (exact loop start position in samples)
-        loop_end: int (exact loop end position in samples)
-        note_distance: float
-        loudness_difference: float
-        score: float. Defaults to 0.
-    """
-
     _loop_start_frame_idx: int
     _loop_end_frame_idx: int
     note_distance: float
@@ -128,7 +119,6 @@ def find_best_loop_points(
 def _analyze_audio(
     mlaudio: MLAudio, skip_beat_analysis: bool = False
 ) -> tuple[np.ndarray, np.ndarray, float, np.ndarray]:
-    """Performs the main audio analysis required."""
     S = librosa.stft(y=mlaudio.audio)
     S_power = S.real**2 + S.imag**2  # Faster than np.abs(S)**2
 
@@ -160,16 +150,6 @@ def _analyze_audio(
         ) from e
 
     return chroma, power_db, bpm, beats
-
-
-@njit(fastmath=True, cache=True)
-def _db_diff(power_db_f1: np.ndarray, power_db_f2: np.ndarray) -> float:
-    return abs(power_db_f1.max() - power_db_f2.max())
-
-
-@njit(fastmath=True, cache=True)
-def _norm(a: np.ndarray) -> np.ndarray:
-    return np.sqrt(np.sum(np.abs(a) ** 2, axis=0))
 
 
 @njit(cache=True, fastmath=True)
@@ -376,22 +356,6 @@ def _calculate_subseq_beat_similarity(
     test_end_offset: int,
     weights: np.ndarray | None = None,
 ) -> float:
-    """
-    Calculates cosine similarity of subsequent/preceding frames at two positions.
-
-    Args:
-        b1_start: Start index for first position (int).
-        b2_start: Start index for second position (int).
-        chroma: Chroma array, shape (n_features, n_frames).
-        test_end_offset: Offset for test end (int, positive=forward, negative=backward).
-        weights: Optional weights for averaging (shape: (test_len,)), or None.
-
-    Returns:
-        Weighted average cosine similarity (float) between the two chroma segments.
-
-    Raises:
-        ValueError: If chroma is not 2D or indices are out of bounds.
-    """
     chroma_len = chroma.shape[-1]
     test_len = abs(test_end_offset)
 
@@ -423,12 +387,6 @@ def _weights(length: int, start: int = 100, stop: int = 1):
 
 @njit(cache=True, fastmath=True)
 def nearest_zero_crossing(audio: np.ndarray, rate: int, sample_idx: int) -> int:
-    """Finds the nearest rising zero crossing with minimal local amplitude.
-
-    - Vectorized: no Python loops over samples or channels.
-    - Prefers rising crossings (negative→positive).
-    - Scores by: local amplitude + distance from target.
-    """
     n_samples, n_channels = audio.shape
     window_size = max(2, rate // 100)  # ~10ms window
     half_win = window_size // 2

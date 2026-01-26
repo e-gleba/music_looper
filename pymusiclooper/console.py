@@ -17,7 +17,6 @@ _BATCH_OPTIONS = ("--recursive", "--flatten")
 
 
 def _option_groups(*extra_basic: str) -> list[dict]:
-    """Build option groups for CLI help styling."""
     return [
         {"name": "Basic options", "options": [*_BASIC_OPTIONS, *extra_basic]},
         {"name": "Advanced loop options", "options": list(_LOOP_OPTIONS)},
